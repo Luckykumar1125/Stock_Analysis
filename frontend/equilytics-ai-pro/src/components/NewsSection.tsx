@@ -73,7 +73,7 @@ export const NewsSection = () => {
     <Card className="glass-card border-card-border">
       <CardHeader>
         <CardTitle className="flex items-center">
-          📰 Latest Market News & Analysis
+          Latest Market News & Analysis
         </CardTitle>
       </CardHeader>
       <CardContent>

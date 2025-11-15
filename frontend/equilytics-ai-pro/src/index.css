@@ -7,7 +7,7 @@
 @layer base {
   :root {
     /* Core Background Colors */
-    --background: 222 25% 7%;
+    --background: 222 15% 8%;
     --foreground: 210 40% 98%;
 
     /* Card System */
@@ -20,14 +20,14 @@
     --glass-border: 222 30% 25% / 0.3;
 
     /* Primary Brand Colors */
-    --primary: 220 91% 65%;
-    --primary-foreground: 210 40% 98%;
-    --primary-glow: 220 91% 75%;
+    --primary: 200 100% 60%;        /* Vibrant Blue */
+    --primary-foreground: 0 0% 100%;
+    --primary-glow: 200 100% 70%;
 
     /* Secondary Colors */
-    --secondary: 267 57% 55%;
-    --secondary-foreground: 210 40% 98%;
-    --secondary-glow: 267 57% 65%;
+     --secondary: 270 70% 60%;       /* Modern Purple Accent */
+    --secondary-foreground: 0 0% 100%;
+    --secondary-glow: 270 70% 70%;
 
     /* Success/Positive */
     --success: 142 71% 45%;
@@ -58,7 +58,7 @@
     --ring: 220 91% 65%;
 
     /* Gradients */
-    --gradient-primary: linear-gradient(135deg, hsl(220 91% 65%), hsl(267 57% 55%));
+    --gradient-primary: linear-gradient(135deg, hsl(200 100% 60%), hsl(270 70% 60%));
     --gradient-secondary: linear-gradient(135deg, hsl(267 57% 55%), hsl(295 85% 60%));
     --gradient-success: linear-gradient(135deg, hsl(142 71% 45%), hsl(158 64% 52%));
     --gradient-chart: linear-gradient(180deg, hsl(220 91% 65% / 0.2), transparent);
@@ -150,6 +150,8 @@
   
   .gradient-primary {
     background: var(--gradient-primary);
+    -webkit-background-clip: text;
+    background-clip: text;
   }
   
   .gradient-secondary {
@@ -213,4 +215,7 @@
 @keyframes fadeIn {
   from { opacity: 0; }
   to { opacity: 1; }
+}
+html {
+  scroll-behavior: smooth;
 }
