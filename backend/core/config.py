@@ -11,7 +11,8 @@ class Settings(BaseSettings):
     WATCHLIST_API_KEY: str
     app_name: str = "Stock News Sentiment API"
     default_user_agent: str = "StockSentimentBot/1.0 (contact)"
-
+    BANK_DB_PATH: str = "Stock_Analysis/backend/bank_statements.db"
+    DB_PATH: str = "Stock_Analysis/backend/sentiment.db"
     class Config:
         env_file = ".env"
 

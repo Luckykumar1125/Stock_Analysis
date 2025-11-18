@@ -74,6 +74,13 @@ class BankStatementParser:
 
             amount = self.parse_amount(amount_match.group(1))
 
+            # Apply + or - sign
+            if transaction_type == "Paid to":
+                amount = -amount   # Expense
+            else:
+                amount = amount    # Income (Received from)
+
+
             transactions.append(
                 Transaction(
                     date=date_str,

@@ -8,7 +8,7 @@ import os
 import json
 import datetime as dt
 from pydantic import BaseModel, Field, field_validator
-
+from dataclasses import dataclass, asdict
 
 class NewsArticle(BaseModel):
     title: str
@@ -101,92 +101,32 @@ class AggregatedSentiment(BaseModel):
     per_article: List[ArticleSentiment]
 
 #balance sheet
-class TransactionType(str, Enum):
-    """Transaction type enum"""
-    PAID = "paid"
-    RECEIVED = "received"
-    SELF_TRANSFER = "self_transfer"
+@dataclass
+class Transaction:
+    date: str           # e.g. "12 Nov, 2024"
+    time: Optional[str] # e.g. "01:24 PM"
+    transaction_type: str  # e.g. "Paid to", "Received from"
+    name: str           # merchant or payer name
+    amount: float       # positive number; deposits should carry positive sign by convention
 
-
-class Transaction(BaseModel):
-    """Individual transaction model"""
-    date: str = Field(..., description="Transaction date")
-    time: str = Field(..., description="Transaction time")
-    transaction_type: TransactionType = Field(..., description="Type of transaction")
-    counterparty: str = Field(..., description="Person or merchant involved")
-    upi_transaction_id: str = Field(..., description="UPI transaction ID")
-    bank_account: str = Field(..., description="Bank account used")
-    amount: float = Field(..., gt=0, description="Transaction amount")
-    
-    @field_validator('amount')
-    @classmethod
-    def validate_amount(cls, v):
-        if v <= 0:
-            raise ValueError('Amount must be positive')
-        return round(v, 2)
-    
-    @field_validator('counterparty')
-    @classmethod
-    def clean_counterparty(cls, v):
-        return v.strip()
-
-
-class StatementSummary(BaseModel):
-    """Statement summary model"""
-    period_start: str = Field(..., description="Statement period start date")
-    period_end: str = Field(..., description="Statement period end date")
-    total_sent: float = Field(..., ge=0, description="Total amount sent")
-    total_received: float = Field(..., ge=0, description="Total amount received")
-    account_number: str = Field(..., description="Account number")
-    email: str = Field(..., description="Email associated with account")
-    
-    @field_validator('total_sent', 'total_received')
-    @classmethod
-    def round_amount(cls, v):
-        return round(v, 2)
-
-
-class GPAYStatement(BaseModel):
-    """Complete GPAY statement model"""
-    summary: StatementSummary
-    transactions: List[Transaction] = Field(default_factory=list)
-    
-    @property
-    def transaction_count(self) -> int:
-        """Get total number of transactions"""
-        return len(self.transactions)
-    
-    @property
-    def paid_transactions(self) -> List[Transaction]:
-        """Get all paid transactions"""
-        return [t for t in self.transactions if t.transaction_type == TransactionType.PAID]
-    
-    @property
-    def received_transactions(self) -> List[Transaction]:
-        """Get all received transactions"""
-        return [t for t in self.transactions if t.transaction_type == TransactionType.RECEIVED]
-    
-    @property
-    def self_transfer_transactions(self) -> List[Transaction]:
-        """Get all self transfer transactions"""
-        return [t for t in self.transactions if t.transaction_type == TransactionType.SELF_TRANSFER]
-    
-    def to_json(self, filepath: str):
-        """Save statement to JSON file"""
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(self.model_dump(), f, indent=2, ensure_ascii=False)
-    
-    @classmethod
-    def from_json(cls, filepath: str):
-        """Load statement from JSON file"""
-        with open(filepath, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        return cls(**data)
-    
-    def get_transactions_by_counterparty(self, counterparty: str) -> List[Transaction]:
-        """Get all transactions with a specific counterparty"""
-        return [t for t in self.transactions if counterparty.lower() in t.counterparty.lower()]
-    
-    def get_transactions_by_date(self, date: str) -> List[Transaction]:
-        """Get all transactions on a specific date"""
-        return [t for t in self.transactions if t.date == date]
+    def normalized_datetime(self) -> datetime:
+        """
+        Try to parse date + time to a datetime object. If time missing, parse date only.
+        Accepts date in formats like "12 Nov, 2024" or "2024-11-12".
+        """
+        date_str = self.date.strip()
+        # try common patterns
+        for fmt in ("%d %b, %Y %I:%M %p", "%d %b, %Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                # if self.time exists append to date
+                if "%I:%M %p" in fmt and self.time:
+                    return datetime.strptime(f"{date_str} {self.time}", "%d %b, %Y %I:%M %p")
+                return datetime.strptime(date_str, fmt)
+            except Exception:
+                continue
+        # fallback: parse only year-month-day if possible
+        try:
+            return datetime.fromisoformat(date_str)
+        except Exception:
+            # last resort: current timestamp
+            return datetime.now()

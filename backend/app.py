@@ -4,7 +4,7 @@ from services.news_fetcher import fetch_news
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse,StreamingResponse, Response
 from services.charts import fetch_live_indices
 from services.finance import process_stock_query_fast
 from services.watchlist import get_ticker_from_company
@@ -12,12 +12,24 @@ import yfinance as yf
 from services.sentiment_analyzer import analyze_sentiment
 from core.config import settings
 import pandas as pd
-from services.extractor.parser import BankStatementParser
+from services.balance_sheet_analyzer.parser import BankStatementParser
 from storage.db import save_transactions
-from pydantic import BaseModel
 import shutil
+from services.balance_sheet_analyzer.processor_llm import (
+    read_transactions_from_db,
+    categorize_transactions,
+    monthly_spend_summary,
+    pie_chart_category,
+    bar_chart_top_merchants
+)
+import os
+import base64
+from typing import Optional,Dict, Any
+from services.stock_screener.dynamic_scrapper import DynamicSectorStockScraper
+from pydantic import BaseModel
 router = APIRouter()
-
+class SectorRequest(BaseModel):
+    sector: str
 app = FastAPI(title="Market News & Analysis API")
 
 app.add_middleware(
@@ -126,3 +138,93 @@ async def parse_bank_statement(file: UploadFile = File(...)):
         "transactions_stored": len(transactions),
         "data": transactions
     })
+    
+DB_PATH = os.getenv("BANK_DB_PATH", "backend/bank_statements.db")
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "db_path": DB_PATH}
+
+@app.get("/analytics")
+def analytics(use_llm: Optional[bool] = Query(True, description="Whether to use LLM fallback for uncategorized merchants")):
+    # read transactions
+    txs = read_transactions_from_db(DB_PATH)
+    if not txs:
+        raise HTTPException(status_code=404, detail="No transactions found in DB")
+
+    categorized = categorize_transactions(txs, use_llm_fallback=use_llm)
+    summary = monthly_spend_summary(categorized)
+
+    # include a small sample of categorized transactions
+    sample = categorized[:20]
+
+    return JSONResponse(content={
+        "summary": summary,
+        "sample_transactions": sample,
+        "counts": {
+            "total_transactions": len(categorized),
+            "llm_classified": sum(1 for t in categorized if t.get("llm_used"))
+        }
+    })
+
+@app.get("/chart/category_pie.png")
+def category_pie(use_llm: Optional[bool] = Query(True)):
+    txs = read_transactions_from_db(DB_PATH)
+    if not txs:
+        raise HTTPException(status_code=404, detail="No transactions found in DB")
+    categorized = categorize_transactions(txs, use_llm_fallback=use_llm)
+    summary = monthly_spend_summary(categorized)
+    img_bytes = pie_chart_category(summary["amount_per_category"])
+    return Response(content=img_bytes, media_type="image/png")
+
+@app.get("/chart/top_merchants.png")
+def top_merchants_chart(use_llm: Optional[bool] = Query(True), top_n: Optional[int] = Query(5)):
+    txs = read_transactions_from_db(DB_PATH)
+    if not txs:
+        raise HTTPException(status_code=404, detail="No transactions found in DB")
+    categorized = categorize_transactions(txs, use_llm_fallback=use_llm)
+    img_bytes = bar_chart_top_merchants(categorized, top_n=top_n)
+    return Response(content=img_bytes, media_type="image/png")
+
+@app.get("/analytics/embedded")
+def analytics_embedded(use_llm: Optional[bool] = Query(True)):
+    """
+    Returns JSON summary + base64-encoded PNG images for easy embedding in clients.
+    """
+    txs = read_transactions_from_db(DB_PATH)
+    if not txs:
+        raise HTTPException(status_code=404, detail="No transactions found in DB")
+    categorized = categorize_transactions(txs, use_llm_fallback=use_llm)
+    summary = monthly_spend_summary(categorized)
+
+    pie_png = pie_chart_category(summary["amount_per_category"])
+    bar_png = bar_chart_top_merchants(categorized)
+
+    return {
+        "summary": summary,
+        "pie_png_base64": base64.b64encode(pie_png).decode(),
+        "bar_png_base64": base64.b64encode(bar_png).decode(),
+    }
+
+#stock screener dynamic sector stocks
+@app.post("/get-sector-stocks")
+# To avoid blocking the event loop with synchronous yfinance/LLM calls, 
+# you should ideally run this in a separate thread pool using 
+# `await asyncio.to_thread(scraper.get_stocks)` or `run_in_threadpool`.
+# For simplicity and direct relevance to your class, this is the synchronous route:
+def get_sector_stocks_sync(req: SectorRequest):
+    """
+    1. Instantiates DynamicSectorStockScraper with the user-provided sector.
+    2. Uses LLM to find Indian companies and convert them to NSE tickers.
+    3. Fetches stock data using yfinance.
+    4. Returns the structured results.
+    """
+    try:
+        scraper = DynamicSectorStockScraper(sector=req.sector)
+        results = scraper.get_stocks()
+        return results
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"An unexpected error occurred: {str(e)}"
+        }
