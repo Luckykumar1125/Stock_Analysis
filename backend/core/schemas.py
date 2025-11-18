@@ -7,6 +7,7 @@ from sqlmodel import SQLModel, Field as ORMField
 import os
 import json
 import datetime as dt
+from pydantic import BaseModel, Field, field_validator
 
 
 class NewsArticle(BaseModel):
@@ -100,34 +101,92 @@ class AggregatedSentiment(BaseModel):
     per_article: List[ArticleSentiment]
 
 #balance sheet
-class ChunkMetadata(BaseModel):
-    section: Optional[str]
-    heading_level: Optional[int]
-    source_file: Optional[str]
-    position: Optional[int]
+class TransactionType(str, Enum):
+    """Transaction type enum"""
+    PAID = "paid"
+    RECEIVED = "received"
+    SELF_TRANSFER = "self_transfer"
 
 
-class TextChunk(BaseModel):
-    text: str
-    metadata: ChunkMetadata
+class Transaction(BaseModel):
+    """Individual transaction model"""
+    date: str = Field(..., description="Transaction date")
+    time: str = Field(..., description="Transaction time")
+    transaction_type: TransactionType = Field(..., description="Type of transaction")
+    counterparty: str = Field(..., description="Person or merchant involved")
+    upi_transaction_id: str = Field(..., description="UPI transaction ID")
+    bank_account: str = Field(..., description="Bank account used")
+    amount: float = Field(..., gt=0, description="Transaction amount")
+    
+    @field_validator('amount')
+    @classmethod
+    def validate_amount(cls, v):
+        if v <= 0:
+            raise ValueError('Amount must be positive')
+        return round(v, 2)
+    
+    @field_validator('counterparty')
+    @classmethod
+    def clean_counterparty(cls, v):
+        return v.strip()
 
 
-class BalanceSheetItem(BaseModel):
-    category: str
-    amount: float
-    type: str
+class StatementSummary(BaseModel):
+    """Statement summary model"""
+    period_start: str = Field(..., description="Statement period start date")
+    period_end: str = Field(..., description="Statement period end date")
+    total_sent: float = Field(..., ge=0, description="Total amount sent")
+    total_received: float = Field(..., ge=0, description="Total amount received")
+    account_number: str = Field(..., description="Account number")
+    email: str = Field(..., description="Email associated with account")
+    
+    @field_validator('total_sent', 'total_received')
+    @classmethod
+    def round_amount(cls, v):
+        return round(v, 2)
 
 
-class BalanceSheetRatios(BaseModel):
-    current_ratio: float
-    debt_to_equity: float
-    equity_ratio: float
-
-
-class BalanceSheetResponse(BaseModel):
-    items: List[BalanceSheetItem]
-    ratios: BalanceSheetRatios
-    explanation: str
-    chunks: Optional[List[TextChunk]] = Field(default=None, description="Chunked text with metadata")
-
-
+class GPAYStatement(BaseModel):
+    """Complete GPAY statement model"""
+    summary: StatementSummary
+    transactions: List[Transaction] = Field(default_factory=list)
+    
+    @property
+    def transaction_count(self) -> int:
+        """Get total number of transactions"""
+        return len(self.transactions)
+    
+    @property
+    def paid_transactions(self) -> List[Transaction]:
+        """Get all paid transactions"""
+        return [t for t in self.transactions if t.transaction_type == TransactionType.PAID]
+    
+    @property
+    def received_transactions(self) -> List[Transaction]:
+        """Get all received transactions"""
+        return [t for t in self.transactions if t.transaction_type == TransactionType.RECEIVED]
+    
+    @property
+    def self_transfer_transactions(self) -> List[Transaction]:
+        """Get all self transfer transactions"""
+        return [t for t in self.transactions if t.transaction_type == TransactionType.SELF_TRANSFER]
+    
+    def to_json(self, filepath: str):
+        """Save statement to JSON file"""
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(self.model_dump(), f, indent=2, ensure_ascii=False)
+    
+    @classmethod
+    def from_json(cls, filepath: str):
+        """Load statement from JSON file"""
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return cls(**data)
+    
+    def get_transactions_by_counterparty(self, counterparty: str) -> List[Transaction]:
+        """Get all transactions with a specific counterparty"""
+        return [t for t in self.transactions if counterparty.lower() in t.counterparty.lower()]
+    
+    def get_transactions_by_date(self, date: str) -> List[Transaction]:
+        """Get all transactions on a specific date"""
+        return [t for t in self.transactions if t.date == date]

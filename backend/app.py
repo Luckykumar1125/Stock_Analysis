@@ -1,21 +1,21 @@
-from fastapi import FastAPI,WebSocket,APIRouter, Depends, HTTPException,Query,UploadFile
+from fastapi import FastAPI,WebSocket,APIRouter, Depends, HTTPException,Query,UploadFile,File
 from core.schemas import APIResponse,MarketInsights,ChatRequest,ChatResponse
 from services.news_fetcher import fetch_news
-# from services.news_categorizer import categorize_news  <-- REMOVED FROM HERE
 from fastapi.middleware.cors import CORSMiddleware
-# from services.market_insights import get_market_insights_async <-- REMOVED FROM HERE
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from services.charts import fetch_live_indices
-from services.finance import process_chat_query 
+from services.finance import process_stock_query_fast
 from services.watchlist import get_ticker_from_company
 import yfinance as yf
 from services.sentiment_analyzer import analyze_sentiment
 from core.config import settings
 import pandas as pd
-
-from core.schemas import BalanceSheetResponse, BalanceSheetItem, BalanceSheetRatios
-
+from services.extractor.parser import BankStatementParser
+from storage.db import save_transactions
+from pydantic import BaseModel
+import shutil
 router = APIRouter()
 
 app = FastAPI(title="Market News & Analysis API")
@@ -72,12 +72,11 @@ def get_live_indices():
         raise HTTPException(status_code=500, detail="Failed to fetch index data.")
     return indices
 
-#chatbot
 @app.post("/chat", response_model=ChatResponse)
 @app.post("/chat/", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
-    """Main chat endpoint for finance queries"""
-    return await process_chat_query(request.query)
+    """Main chat endpoint for finance queries using the new stock assistant pipeline."""
+    return await process_stock_query_fast(request.query)
 
 #watchlist 
 @app.get("/api/stock/{company}")
@@ -103,23 +102,27 @@ async def sentiment(query: str = Query(..., description="Company name or ticker"
     return await analyze_sentiment(query)
 
 # #balance sheet analyzer
-# @app.post("/analyze-balance-sheet", response_model=BalanceSheetResponse)
-# async def analyze_balance_sheet(file: UploadFile):
-#     """
-#     Upload a company's balance sheet (PDF or CSV) and get categorized financial analysis.
-#     Works for any company format.
-#     """
-#     try:
-#         df = extract_balance_sheet(file)
-#         df = categorize(df)
-#         ratios = compute_ratios(df)
-#         explanation = explain_ratios(ratios)
+@app.post("/parse-bank-statement")
+async def parse_bank_statement(file: UploadFile = File(...)):
+    """
+    Upload a bank statement PDF, extract JSON,
+    and store transactions in the database.
+    """
 
-#         items = [BalanceSheetItem(category=row["Category"], amount=row["Amount"], type=row["Type"])
-#                  for _, row in df.iterrows()]
-#         ratio_model = BalanceSheetRatios(**ratios)
+    # Save uploaded file temporarily
+    temp_pdf_path = f"/tmp/{file.filename}"
+    with open(temp_pdf_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
 
-#         return BalanceSheetResponse(items=items, ratios=ratio_model, explanation=explanation)
+    # Parse the bank statement
+    parser = BankStatementParser(temp_pdf_path)
+    transactions = parser.to_json()  # <-- list of dicts
 
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=f"Error analyzing balance sheet: {str(e)}")
+    # Save to database
+    save_transactions(transactions)
+
+    return JSONResponse(content={
+        "message": "Parsed and stored successfully.",
+        "transactions_stored": len(transactions),
+        "data": transactions
+    })
