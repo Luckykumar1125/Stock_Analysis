@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import SentimentModal from "@/components/SentimentModal";
+import StockScreener from "@/components/StockScreener"; // import the new component
 
 interface Tool {
   id: string;
@@ -104,9 +105,23 @@ export const ToolsGrid = () => {
         ))}
       </div>
 
-      {/* Sentiment Modal */}
+      {/* Modals / Dynamic Components */}
       {selectedTool === "sentiment" && (
         <SentimentModal onClose={() => setSelectedTool(null)} />
+      )}
+
+      {selectedTool === "screener" && (
+        <div className="fixed inset-0 bg-black/50 flex justify-center items-start z-50 p-4 overflow-auto">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-7xl p-6 relative">
+            <button
+              className="absolute top-4 right-4 text-gray-500 hover:text-gray-700 font-bold text-xl"
+              onClick={() => setSelectedTool(null)}
+            >
+              ×
+            </button>
+            <StockScreener />
+          </div>
+        </div>
       )}
     </div>
   );
