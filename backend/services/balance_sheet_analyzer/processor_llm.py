@@ -1,5 +1,3 @@
-## 📝 Cleaned and Fixed Code
-
 import os
 import json
 import sqlite3
@@ -10,7 +8,9 @@ from io import BytesIO
 from pathlib import Path
 import requests
 from matplotlib import pyplot as plt
-
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 from core.schemas import Transaction
 
 # -------------------------
@@ -308,73 +308,136 @@ def monthly_spend_summary(categorized_transactions: List[Dict[str, Any]]) -> Dic
 # -------------------------
 # Charts (matplotlib)
 # -------------------------
+# -------------------------
+# Charts (Modern Dark Mode)
+# -------------------------
+
+# A palette that pops against dark backgrounds (Blue, Teal, Purple, Amber, Emerald)
+DARK_MODE_PALETTE = ["#3b82f6", "#14b8a6", "#8b5cf6", "#f59e0b", "#10b981", "#ec4899", "#06b6d4"]
+
 def pie_chart_category(amount_per_category: Dict[str, float]) -> bytes:
     """
-    Returns PNG bytes for a category breakdown pie chart (Spend only).
+    Returns PNG bytes for a modern Dark Mode Donut Chart.
     """
-    # Filter out categories with zero or negative spend (or use absolute value)
-    filtered_amounts = {k: v for k, v in amount_per_category.items() if v > 0}
+    # 1. Filter Data (Ignore zero or negative spend)
+    data = {k: v for k, v in amount_per_category.items() if v > 0.01}
+    
+    if not data:
+         fig, ax = plt.subplots(figsize=(1, 1))
+         fig.patch.set_alpha(0.0) # Transparent
+         ax.axis('off')
+         buf = BytesIO()
+         plt.savefig(buf, format='png', transparent=True)
+         plt.close(fig)
+         buf.seek(0)
+         return buf.read()
 
-    labels = list(filtered_amounts.keys())
-    sizes = [float(filtered_amounts[k]) for k in labels]
+    # 2. Sort Data (Largest slice starts at 12 o'clock)
+    labels = list(data.keys())
+    values = list(data.values())
+    
+    sorted_indices = np.argsort(values)[::-1]
+    sorted_labels = [labels[i] for i in sorted_indices]
+    sorted_values = [values[i] for i in sorted_indices]
 
-    fig, ax = plt.subplots(figsize=(8, 8))
-    if not any(sizes):
-        ax.text(0.5, 0.5, "No data (zero or no spending)", ha="center", va="center", fontsize=14)
-    else:
-        # Use a more readable autopct format
-        def autopct_format(pct):
-            total = sum(sizes)
-            val = int(round(pct * total / 100.0))
-            return f'{pct:.1f}%\n({val:,.0f})'
-            
-        ax.pie(sizes, labels=labels, autopct=autopct_format, startangle=90, textprops={'fontsize': 10})
-        ax.set_title("Spend by Category", fontsize=16)
-        ax.axis('equal') # Equal aspect ratio ensures that pie is drawn as a circle.
+    # 3. Prepare Colors
+    colors = DARK_MODE_PALETTE * (len(sorted_labels) // len(DARK_MODE_PALETTE) + 1)
+    colors = colors[:len(sorted_labels)]
 
+    # 4. Setup Plot
+    fig, ax = plt.subplots(figsize=(7, 7))
+    fig.patch.set_alpha(0.0) # Transparent background
+    ax.patch.set_alpha(0.0)
+
+    # 5. Helper to hide labels on tiny slices (< 3%)
+    def make_autopct(val_list):
+        def my_autopct(pct):
+            return f'{pct:.0f}%' if pct > 3 else ''
+        return my_autopct
+
+    # 6. Draw Donut
+    wedges, texts, autotexts = ax.pie(
+        sorted_values,
+        labels=sorted_labels,
+        colors=colors,
+        autopct=make_autopct(sorted_values),
+        startangle=90,
+        counterclock=False,
+        pctdistance=0.80,
+        labeldistance=1.25, rotatelabels=True,
+        wedgeprops={'width': 0.5, 'edgecolor': '#1e293b', 'linewidth': 2},
+        textprops={'color': 'white', 'fontsize': 14, 'fontweight': 'bold'}
+    )
+
+    # Style internal percentages
+    plt.setp(autotexts, size=9, weight="bold", color="white")
+    
+    # Style external labels (optional: make them slightly grey to reduce visual noise)
+    plt.setp(texts, color="#e2e8f0") 
+
+    ax.axis('equal')
+    
     buf = BytesIO()
-    plt.tight_layout()
-    fig.savefig(buf, format="png")
+    # transparent=True is critical for the glassmorphism look
+    plt.savefig(buf, format="png", bbox_inches='tight', transparent=True, dpi=100)
     plt.close(fig)
     buf.seek(0)
     return buf.read()
 
 def bar_chart_top_merchants(categorized_transactions: List[Dict[str, Any]], top_n: int = 5) -> bytes:
     """
-    Returns PNG bytes for a horizontal bar chart of top merchants by total amount spent.
+    Returns PNG bytes for a Dark Mode Horizontal Bar Chart.
     """
-    # Calculate *net* merchant amounts, then consider only top *spenders*
+    # Calculate net spend per merchant
     merchant_amounts = defaultdict(float)
     for tx in categorized_transactions:
-        # Assuming spend is negative/debit/outgoing
         amt = float(tx.get("amount", 0.0))
+        cat = tx.get("category", "Others")
         typ = (tx.get("transaction_type") or "").lower()
-        if any(k in typ for k in EXPENSE_KEYWORDS):
+        
+        # Logic: If it's an expense, add to total
+        is_expense = any(k in typ for k in EXPENSE_KEYWORDS) and cat != "Salary"
+        if is_expense:
             merchant_amounts[tx.get("name", "Unknown")] += abs(amt)
-        # Handle cases where amount is stored as a positive expense
-        elif amt > 0 and tx.get("category") != "Salary" and not any(k in typ for k in INCOME_KEYWORDS):
+        elif amt > 0 and cat != "Salary" and not any(k in typ for k in INCOME_KEYWORDS):
+            # Fallback for positive amounts that are expenses
             merchant_amounts[tx.get("name", "Unknown")] += amt
 
-
-    # Filter and sort by amount spent (positive values)
+    # Sort top N
     top = sorted(merchant_amounts.items(), key=lambda x: x[1], reverse=True)[:top_n]
     names = [t[0] for t in top]
     amounts = [t[1] for t in top]
 
+    # Setup Plot
     fig, ax = plt.subplots(figsize=(8, 4))
-    if not amounts or all(a == 0 for a in amounts):
-        ax.text(0.5, 0.5, "No data (zero or no spending)", ha="center", va="center", fontsize=14)
+    fig.patch.set_alpha(0.0) # Transparent
+    ax.patch.set_alpha(0.0)
+    
+    if not amounts:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", color="white")
+        ax.axis('off')
     else:
-        # Horizontal bar chart, reversed for biggest on top
-        ax.barh(names[::-1], amounts[::-1], color='skyblue') 
-        ax.set_xlabel("Amount Spent")
-        ax.set_title(f"Top {top_n} Merchants by Spend")
-        # Format X-axis ticks to be comma-separated
-        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:,.0f}'))
+        # Horizontal bars
+        y_pos = np.arange(len(names))
+        # Reverse order so biggest is at top
+        ax.barh(y_pos[::-1], amounts[::-1], color='#3b82f6', height=0.6) 
+        
+        # Labels and Ticks styling for Dark Mode
+        ax.set_yticks(y_pos[::-1])
+        ax.set_yticklabels(names[::-1], color='white', fontsize=10)
+        ax.set_xlabel("Amount Spent (₹)", color='#94a3b8')
+        ax.tick_params(axis='x', colors='#94a3b8')
+        ax.tick_params(axis='y', colors='white')
+        
+        # Remove ugly borders (spines)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['bottom'].set_color('#334155')
+        ax.spines['left'].set_visible(False)
 
     plt.tight_layout()
     buf = BytesIO()
-    fig.savefig(buf, format="png")
+    plt.savefig(buf, format="png", bbox_inches='tight', transparent=True)
     plt.close(fig)
     buf.seek(0)
     return buf.read()

@@ -3,7 +3,9 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import SentimentModal from "@/components/SentimentModal";
 import StockScreener from "@/components/StockScreener";
-import PortfolioAnalyzer from "./PortfolioAnalyzer"; 
+import PortfolioAnalyzer from "./PortfolioAnalyzer";
+import BalanceSheetAnalyzer from "./BalanceSheetAnalyzer"; // <--- Imported here
+
 interface Tool {
   id: string;
   icon: string;
@@ -108,19 +110,17 @@ export const ToolsGrid = () => {
         ))}
       </div>
 
-      {/* Modals / Dynamic Components */}
+      {/* --- Modals Section --- */}
+
+      {/* 1. Sentiment Modal */}
       {selectedTool === "sentiment" && (
         <SentimentModal onClose={() => setSelectedTool(null)} />
       )}
 
+      {/* 2. Stock Screener Modal */}
       {selectedTool === "screener" && activeToolData && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex justify-center items-center z-50 p-4">
-          {/* UPDATES MADE HERE:
-             1. Changed 'bg-white' to 'bg-background' or 'glass-card' to match dark theme.
-             2. Added 'border-border' for definition.
-             3. Passing actual activeToolData props instead of empty strings.
-          */}
-          <div className="bg-background border border-border/50 rounded-xl shadow-2xl w-full max-w-7xl max-h-[90vh] overflow-y-auto p-6 relative animate-in fade-in zoom-in-95 duration-200">
+          <div className="bg-background border border-border/50 rounded-xl shadow-2xl w-full max-w-7xl max-h-[90vh] overflow-y-auto p-6 relative animate-in fade-in zoom-in-95 duration-200 custom-scrollbar">
             <button
               className="absolute top-4 right-4 text-muted-foreground hover:text-foreground transition-colors font-bold text-xl z-10"
               onClick={() => setSelectedTool(null)}
@@ -138,6 +138,8 @@ export const ToolsGrid = () => {
           </div>
         </div>
       )}
+
+      {/* 3. Portfolio Analyzer Modal */}
       {selectedTool === "portfolio" && activeToolData && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex justify-center items-center z-50 p-4">
           <div className="bg-background border border-border/50 rounded-xl shadow-2xl w-full max-w-7xl max-h-[90vh] overflow-y-auto p-6 relative animate-in fade-in zoom-in-95 duration-200 custom-scrollbar">
@@ -148,8 +150,23 @@ export const ToolsGrid = () => {
               ✕
             </button>
             
-            {/* 2. Render the component */}
             <PortfolioAnalyzer />
+          </div>
+        </div>
+      )}
+
+      {/* 4. Balance Sheet Analyzer Modal (NEW) */}
+      {selectedTool === "balance" && activeToolData && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex justify-center items-center z-50 p-4">
+          <div className="bg-background border border-border/50 rounded-xl shadow-2xl w-full max-w-7xl max-h-[90vh] overflow-y-auto p-6 relative animate-in fade-in zoom-in-95 duration-200 custom-scrollbar">
+            <button
+              className="absolute top-4 right-4 text-muted-foreground hover:text-foreground transition-colors font-bold text-xl z-10"
+              onClick={() => setSelectedTool(null)}
+            >
+              ✕
+            </button>
+            
+            <BalanceSheetAnalyzer />
           </div>
         </div>
       )}
