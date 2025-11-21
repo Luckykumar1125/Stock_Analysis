@@ -1,14 +1,12 @@
 from __future__ import annotations
-from pydantic import BaseModel,Field,validator
-from typing import List,Optional,Dict,Any
-from datetime import date,datetime
-from enum import Enum
-from sqlmodel import SQLModel, Field as ORMField
-import os
-import json
-import datetime as dt
-from pydantic import BaseModel, Field, field_validator
-from dataclasses import dataclass, asdict
+from typing import List, Optional, Dict, Any
+from datetime import datetime, date
+from dataclasses import dataclass
+from pydantic import BaseModel, Field
+
+# -------------------------------------------------------------------
+# 1. News & Categorization Schemas
+# -------------------------------------------------------------------
 
 class NewsArticle(BaseModel):
     title: str
@@ -23,20 +21,57 @@ class CategorizedNews(BaseModel):
     source: str
     published_at: str
 
-class MarketInsights(BaseModel):
-    market_sentiment: str = Field(..., description="Overall market sentiment, e.g., 'Bullish', 'Neutral', 'Bearish'.")
-    market_sentiment_description: str = Field( ..., description="A two-line summary explaining the market sentiment based on news.")
-    volatility_alert: str = Field(..., description="Expected market volatility, e.g., 'High', 'Moderate', 'Low'.")
-    volatility_alert_description: str = Field(..., description="A two-line explanation of the expected price swings and the reasons.")
-    top_recommendation: str = Field(..., description="A key recommendation for a sector or stock based on the analysis.")
-    risk_assessment: str = Field(..., description="Overall risk level for current market conditions, e.g., 'High', 'Medium', 'Low'.")
-    risk_assessment_description: str = Field(..., description="A two-line justification for the risk assessment, referencing market conditions."
-    )
-
-
 class APIResponse(BaseModel):
     section: str
     items: List[CategorizedNews]
+
+# -------------------------------------------------------------------
+# 2. Market Insights (AI Analysis)
+# -------------------------------------------------------------------
+
+class MarketInsights(BaseModel):
+    market_sentiment: str = Field(..., description="Overall market sentiment, e.g., 'Bullish', 'Neutral', 'Bearish'.")
+    market_sentiment_description: str = Field(..., description="A two-line summary explaining the market sentiment.")
+    
+    volatility_alert: str = Field(..., description="Expected market volatility, e.g., 'High', 'Moderate', 'Low'.")
+    volatility_alert_description: str = Field(..., description="Explanation of expected price swings.")
+    
+    top_recommendation: str = Field(..., description="Key recommendation for a sector/stock with an emoji.")
+    # --- CRITICAL FIX: Added this missing field below ---
+    top_recommendation_description: str = Field(..., description="Summary of the recommendation upside.")
+    
+    risk_assessment: str = Field(..., description="Overall risk level, e.g., 'High', 'Medium', 'Low'.")
+    risk_assessment_description: str = Field(..., description="Justification for the risk assessment.")
+
+# -------------------------------------------------------------------
+# 3. Chatbot Schemas
+# -------------------------------------------------------------------
+
+class ChatRequest(BaseModel):
+    query: str = Field(..., description="User's finance-related query")
+
+class StockData(BaseModel):
+    ticker: Optional[str] = None
+    company_name: Optional[str] = None
+    current_price: Optional[float] = None
+    previous_close: Optional[float] = None
+    market_cap: Optional[float] = None
+    currency: Optional[str] = None
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    website: Optional[str] = None
+    price_change: Optional[float] = None
+    price_change_percent: Optional[float] = None
+
+class ChatResponse(BaseModel):
+    answer: str
+    stock_data: Optional[StockData] = None
+    raw_data: Optional[Dict[str, Any]] = None
+    query_type: str = Field(default="general", description="Type of query: stock, general, error")
+
+# -------------------------------------------------------------------
+# 4. Charting & Indices
+# -------------------------------------------------------------------
 
 class ChartDataPoint(BaseModel):
     timestamp: int
@@ -54,44 +89,22 @@ class IndexChart(BaseModel):
 class IndexList(BaseModel):
     indices: List[IndexChart]
 
-class ChatRequest(BaseModel):
-    query: str = Field(..., description="User's finance-related query")
+# -------------------------------------------------------------------
+# 5. Sentiment Analysis (Specific Engine)
+# -------------------------------------------------------------------
 
-
-class StockData(BaseModel):
-    ticker: Optional[str] = None
-    company_name: Optional[str] = None
-    current_price: Optional[float] = None
-    previous_close: Optional[float] = None
-    market_cap: Optional[float] = None
-    currency: Optional[str] = None
-    sector: Optional[str] = None
-    industry: Optional[str] = None
-    website: Optional[str] = None
-    price_change: Optional[float] = None
-    price_change_percent: Optional[float] = None
-
-
-class ChatResponse(BaseModel):
-    answer: str
-    stock_data: Optional[StockData] = None
-    raw_data: Optional[Dict[str, Any]] = None
-    query_type: str = Field(default="general", description="Type of query: stock, general, error")
-
-
-#sentiment
 class SentimentRequest(BaseModel):
-    query: str = Field(..., description="Stock ticker or company name to search news for, e.g. AAPL or Apple Inc.")
-    max_articles: int = Field(10, ge=1, le=50, description="Max number of articles to fetch and analyze")
-    analyzer: Optional[str] = Field("rule", description="Analyzer to use: 'rule' or 'hf'")
+    query: str = Field(..., description="Stock ticker or company name.")
+    max_articles: int = Field(10, ge=1, le=50)
+    analyzer: Optional[str] = Field("rule")
 
 class ArticleSentiment(BaseModel):
     title: str
     link: Optional[str] = None
     published: Optional[datetime] = None
     snippet: Optional[str] = None
-    score: float = Field(..., description="Sentiment score; positive >0, negative <0, range roughly -1..1")
-    label: str = Field(..., description="'POSITIVE', 'NEGATIVE', or 'NEUTRAL'")
+    score: float
+    label: str
 
 class AggregatedSentiment(BaseModel):
     query: str
@@ -100,41 +113,8 @@ class AggregatedSentiment(BaseModel):
     overall_label: str
     per_article: List[ArticleSentiment]
 
-#balance sheet
-@dataclass
-class Transaction:
-    date: str           # e.g. "12 Nov, 2024"
-    time: Optional[str] # e.g. "01:24 PM"
-    transaction_type: str  # e.g. "Paid to", "Received from"
-    name: str           # merchant or payer name
-    amount: float       # positive number; deposits should carry positive sign by convention
-
-    def normalized_datetime(self) -> datetime:
-        """
-        Try to parse date + time to a datetime object. If time missing, parse date only.
-        Accepts date in formats like "12 Nov, 2024" or "2024-11-12".
-        """
-        date_str = self.date.strip()
-        # try common patterns
-        for fmt in ("%d %b, %Y %I:%M %p", "%d %b, %Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-            try:
-                # if self.time exists append to date
-                if "%I:%M %p" in fmt and self.time:
-                    return datetime.strptime(f"{date_str} {self.time}", "%d %b, %Y %I:%M %p")
-                return datetime.strptime(date_str, fmt)
-            except Exception:
-                continue
-        # fallback: parse only year-month-day if possible
-        try:
-            return datetime.fromisoformat(date_str)
-        except Exception:
-            # last resort: current timestamp
-            return datetime.now()
-        
-        
-#sentiment analysis engine
 class StockRequest(BaseModel):
-    stock_ticker: str  # e.g. TSLA
+    stock_ticker: str 
 
 class TrendingTicker(BaseModel):
     ticker: str
@@ -150,3 +130,42 @@ class StockResponse(BaseModel):
     trending_tickers: List[TrendingTicker]
     market_prediction: MarketPrediction
     timestamp: datetime
+
+# -------------------------------------------------------------------
+# 6. Balance Sheet / Transactions
+# -------------------------------------------------------------------
+
+@dataclass
+class Transaction:
+    date: str           
+    time: Optional[str] 
+    transaction_type: str  
+    name: str           
+    amount: float       
+
+    def normalized_datetime(self) -> datetime:
+        """
+        Parses date string into a datetime object.
+        """
+        date_str = self.date.strip()
+        # Try specific formats first
+        formats = [
+            "%d %b, %Y %I:%M %p", # 12 Nov, 2024 01:24 PM
+            "%d %b, %Y",          # 12 Nov, 2024
+            "%Y-%m-%d %H:%M:%S",  
+            "%Y-%m-%d"
+        ]
+        
+        for fmt in formats:
+            try:
+                if "%I:%M %p" in fmt and self.time:
+                    return datetime.strptime(f"{date_str} {self.time}", fmt)
+                return datetime.strptime(date_str, fmt)
+            except ValueError:
+                continue
+        
+        # Fallback
+        try:
+            return datetime.fromisoformat(date_str)
+        except ValueError:
+            return datetime.now()

@@ -1,5 +1,5 @@
 import os
-import requests
+import httpx
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
@@ -9,77 +9,104 @@ from core.schemas import MarketInsights
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-NEWS_API_URL_INSIGHTS = os.getenv("NEWS_API_URL_INSIGHTS")
+NEWS_API_URL_INSIGHTS = os.getenv("NEWS_API_URL_INSIGHTS", "https://newsapi.org/v2/everything")
 
-# Initialize LLM and chains once
+# --- 1. Initialize LLM ---
 llm = ChatGroq(
     model="llama-3.1-8b-instant",
-    temperature=0,
+    temperature=0.2, # Slightly increased to allow for creative connection of facts
     groq_api_key=GROQ_API_KEY
 )
 
+# --- 2. Robust Prompt (Forces a Recommendation) ---
 prompt = ChatPromptTemplate.from_messages(
     [
          ("system",
-         "You are a specialized market analyst AI. Your task is to provide a structured market report based on the provided news articles. "
-         "You must strictly adhere to the following rules:"
-         "1. Analyze the overall market sentiment and provide a clear label (`market_sentiment`)."
-         "2. Write a brief, two-line description for the sentiment (`market_sentiment_description`), explaining why it was chosen."
-         "3. Assess market volatility and provide a clear label (`volatility_alert`)."
-         "4. Write a two-line explanation for the volatility (`volatility_alert_description`), including a price swing range (e.g., '2-3%')."
-         "5. Identify the top investment recommendation and provide a label (`top_recommendation`), including a relevant emoji."
-         "6. Write a two-line summary of the recommendation (`top_recommendation_description`), referencing the upside potential."
-         "7. Evaluate the overall risk and provide a label (`risk_assessment`)."
-         "8. Write a two-line justification for the risk assessment (`risk_assessment_description`), referencing current market conditions."
-         "9. The final output must be a single, valid JSON object that conforms exactly to the provided schema, with no additional text or conversational phrases. All insights must be directly inferred from the news context."),
-        ("human", "Analyze the following news articles to create a market report:\n\n{news_text}")
+         """You are a Wall Street strategist. Generate a daily market report based on the news provided.
+
+         CRITICAL INSTRUCTION FOR 'TOP RECOMMENDATION':
+         - You MUST provide a recommendation. Do not leave it empty.
+         - If the news mentions specific stocks (e.g., "Apple", "Tesla"), recommend the best one.
+         - If NO specific stocks are mentioned, you MUST recommend a SECTOR based on sentiment (e.g., "Technology 💻", "Energy ⚡", "Defensive Stocks 🛡️").
+         - Usage of emojis is highly encouraged for the visual appeal.
+         
+         Analyze the text below and populate the response strictly."""),
+        ("human", "News Data:\n{news_text}")
     ]
 )
 
-analysis_chain = prompt | llm.with_structured_output(schema=MarketInsights)
+# Bind the schema
+analysis_chain = prompt | llm.with_structured_output(MarketInsights)
 
-def fetch_news_sync(query: str) -> str:
-    """A synchronous helper function to fetch news."""
-    try:
-        params = {
-            'q': query,
-            'apiKey': NEWS_API_KEY,
-            'language': 'en',
-            'sortBy': 'relevancy',
-            'pageSize': 10
-        }
-        response = requests.get(NEWS_API_URL_INSIGHTS, params=params)
-        response.raise_for_status()
-        articles = response.json().get('articles', [])
-        
-        return "\n\n".join([
-            f"Title: {article.get('title', '')}\nDescription: {article.get('description', '')}"
-            for article in articles
-        ])
-    except Exception as e:
-        print(f"Error fetching news: {e}")
-        return ""
+# --- 3. Tuned News Fetcher ---
+async def fetch_news_async(query: str = "stock market") -> str:
+    """Async helper to fetch HIGH QUALITY news."""
+    async with httpx.AsyncClient() as client:
+        try:
+            params = {
+                # We search for 'market', 'stocks', or 'trading' to ensure financial relevance
+                'q': "stock market OR investing OR analyst ratings",
+                'apiKey': NEWS_API_KEY,
+                'language': 'en',
+                # 'popularity' gives us major headlines (CNBC, Bloomberg) instead of random blogs
+                'sortBy': 'popularity', 
+                'pageSize': 8 
+            }
+            response = await client.get(NEWS_API_URL_INSIGHTS, params=params)
+            response.raise_for_status()
+            data = response.json()
+            articles = data.get('articles', [])
+            
+            if not articles:
+                return ""
 
+            # improved formatting to help the AI understand the context
+            news_text = "\n".join([
+                f"- TITLE: {article.get('title', '')} | DESC: {article.get('description', '')}"
+                for article in articles
+                if article.get('title') and article.get('description') # Filter out empty trash
+            ])
+            return news_text
+            
+        except Exception as e:
+            print(f"Error fetching news: {e}")
+            return ""
+
+# --- 4. Main Orchestrator ---
 async def get_market_insights_async() -> MarketInsights:
     """
-    An async function that orchestrates the data fetching and analysis.
-    This is the function you will import.
+    Orchestrates fetching and analysis.
     """
-    # Note: requests is a synchronous library.
-    # FastAPI automatically runs sync functions in a threadpool to avoid blocking.
-    # So you don't need to manually use run_in_executor here.
-    news_data = fetch_news_sync(query="AI innovation, tech stocks, market trends")
+    # 1. Fetch Data
+    news_data = await fetch_news_async()
     
+    # 2. Handle empty data (Fallback)
     if not news_data:
-        # Return a default model instance on failure
         return MarketInsights(
             market_sentiment="Neutral",
+            market_sentiment_description="Data temporarily unavailable. Market appears stable.",
             volatility_alert="Low",
-            top_recommendation="No data available",
-            risk_assessment="Low"
+            volatility_alert_description="No significant news triggering volatility.",
+            top_recommendation="Broad Market Index 📊",
+            top_recommendation_description="Consider holding index funds until clearer signals emerge.",
+            risk_assessment="Low",
+            risk_assessment_description="Lack of data suggests no immediate high-impact threats."
         )
     
-    # Invoke the LangChain for structured extraction
-    insights = analysis_chain.invoke({"news_text": news_data})
-    
-    return insights
+    # 3. Invoke LLM
+    try:
+        insights = await analysis_chain.ainvoke({"news_text": news_data})
+        return insights
+    except Exception as e:
+        print(f"LLM Generation Error: {e}")
+        # Fallback if LLM crashes
+        return MarketInsights(
+            market_sentiment="Neutral",
+            market_sentiment_description="Analysis system is rebooting.",
+            volatility_alert="Unknown",
+            volatility_alert_description="Unable to calculate volatility.",
+            top_recommendation="Cash 💵",
+            top_recommendation_description="Stay in cash while we restore data feeds.",
+            risk_assessment="Medium",
+            risk_assessment_description="System error prevented full analysis."
+        )

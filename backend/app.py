@@ -22,6 +22,7 @@ from services.balance_sheet_analyzer.processor_llm import (
     pie_chart_category,
     bar_chart_top_merchants
 )
+from services.news_categorizer import categorize_news
 import os,requests,re,logging
 import base64
 from typing import Optional,Dict, Any
@@ -36,12 +37,7 @@ from pydantic import BaseModel,HttpUrl
 # )
 # from core.schemas import StockRequest, StockResponse, MarketPrediction, TrendingTicker
 # from services.sentiment_analysis.engine import generate_market_prediction, identify_trending_tickers
-from services.upcoming_sales import (
-    search_general_sales,
-    scrape_content,
-    extract_mixed_sales,
-    ScrapeResponse
-)
+from services.upcoming_sales import scrape_upcoming_sales, SalesResponse
 from services.portfolio_analyzer.portfolio import PortfolioAnalyzerService,generate_advice,PortfolioRequest,get_groq_client,Groq,PortfolioAPIResponse
 from services.price_prediction.price import predict_stock_price, StockRequest
 router = APIRouter()
@@ -65,11 +61,14 @@ def get_news():
     Fetch and categorize latest market news.
     Refreshes every time the browser refreshes.
     """
-    # --- FIX 1: Import locally to avoid circular dependency ---
-    from services.news_categorizer import categorize_news
-    
+    # 1. Fetch raw articles
+    # Note: This takes time (API calls). Be aware this makes the endpoint slow.
     articles = fetch_news()
+    
+    # 2. Process with LLM
+    # Note: This takes even more time (LLM generation).
     categorized = categorize_news(articles)
+    
     return APIResponse(section="Latest Market News & Analysis", items=categorized)
 
 #ai market insights
@@ -280,42 +279,27 @@ def get_sector_stocks_sync(req: SectorRequest):
 #     )
 
 #upcoming sales scraper
-@app.post("/scrape-all-sales", response_model=ScrapeResponse)
-async def scrape_all_sales():
+@app.get("/api/upcoming-sales", response_model=SalesResponse)
+def get_upcoming_sales():
     """
-    Scrapes the web for ANY active sales, deals, or clearance events across all sectors.
+    Triggers a live web scrape to find the latest upcoming sales.
+    Warning: This endpoint takes 5-10 seconds to execute.
     """
-    print("🚀 Starting universal sales scrape...")
-    
-    # 1. Broad Search
-    search_results = search_general_sales(max_results=5)
-    
-    if not search_results:
-        raise HTTPException(status_code=404, detail="Could not find active sales lists.")
-
-    all_sales = []
-    visited = []
-
-    # 2. Scrape & Extract
-    for res in search_results:
-        url = res['href']
-        print(f"Processing: {res['title']}")
-        visited.append(url)
+    try:
+        data = scrape_upcoming_sales()
         
-        raw_text = scrape_content(url)
-        
-        if raw_text:
-            events = extract_mixed_sales(raw_text, url)
-            all_sales.extend(events)
+        if not data.sales:
+            # If search failed, return empty list but 200 OK
+            return {
+                "sales": [],
+                "last_updated": "Now (No sales found)"
+            }
             
-    # Deduplicate by company name to keep list clean
-    unique_sales = {s.company_name: s for s in all_sales}.values()
-
-    return ScrapeResponse(
-        total_found=len(unique_sales),
-        source_urls_visited=visited,
-        sales=list(unique_sales)
-    )
+        return data
+        
+    except Exception as e:
+        print(f"Scraper Endpoint Error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch sales data")
     
     
 #portfolio_analyzer endpoints would go here

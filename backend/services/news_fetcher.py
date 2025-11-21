@@ -15,34 +15,32 @@ def fetch_news() -> list[NewsArticle]:
             data = response.json()
             
             if not isinstance(data.get("results"), list):
-                print(f"API response missing 'results' key or not a list. Response: {data}")
+                print(f"API response missing 'results' key. Response: {data}")
                 return []
                 
             articles = []
             for item in data["results"]:
+                # We treat 'description' as the raw excerpt
                 articles.append(NewsArticle(
                     title=item.get("title", "No title"),
-                    excerpt=item.get("description", "No description"),
+                    excerpt=item.get("description") or item.get("content") or "No content",
                     source=item.get("source_id", "Unknown"),
                     published_at=item.get("pubDate", "")
                 ))
             return articles
         except requests.exceptions.RequestException as e:
             print(f"Request failed: {e}")
-            if 'response' in locals() and response.text:
-                print(f"API returned: {response.text}")
             return []
         except Exception as e:
             print(f"An unexpected error occurred: {e}")
             return []
 
-    # Fetch Indian financial news
-    indian_url = f"https://newsdata.io/api/1/latest?country=in&category=business&size=5&apikey={settings.WATCHLIST_API_KEY}"
+    # Fetch Indian financial news (Increased size to 10)
+    indian_url = f"https://newsdata.io/api/1/latest?country=in&category=business&size=10&apikey={settings.WATCHLIST_API_KEY}"
     combined_articles.extend(fetch_articles_from_url(indian_url))
 
-    # Fetch international financial news (from the US)
+    # Fetch international financial news (US)
     international_url = f"https://newsdata.io/api/1/latest?country=us&category=business&size=5&apikey={settings.WATCHLIST_API_KEY}"
     combined_articles.extend(fetch_articles_from_url(international_url))
 
     return combined_articles
-

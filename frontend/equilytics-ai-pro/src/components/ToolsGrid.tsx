@@ -6,7 +6,7 @@ import StockScreener from "@/components/StockScreener";
 import PortfolioAnalyzer from "./PortfolioAnalyzer";
 import BalanceSheetAnalyzer from "./BalanceSheetAnalyzer"; // <--- Imported here
 import StockDashboard from "./PricePredictions";
-
+import SalesDashboard from "./UpcomingSales"
 interface Tool {
   id: string;
   icon: string;
@@ -60,12 +60,12 @@ export const ToolsGrid = () => {
       action: "Get Predictions",
     },
     {
-      id: "risk",
-      icon: "⚠️",
-      title: "Risk Calculator",
+      id: "sales",
+      icon: "🚨",
+      title: "Upcoming Sales Alerts",
       description:
-        "Personalized risk assessment based on your profile, investment goals, and current market conditions.",
-      action: "Calculate Risk",
+        "Stay ahead with alerts on upcoming stock sales and insider trading activities that may impact stock prices.",
+      action: "View Alerts",
     },
   ];
 
@@ -192,6 +192,24 @@ export const ToolsGrid = () => {
           </div>
         </div>
       )}
-    </div>
+      {/* ... previous modals ... */}
+      
+      {/* 6. Upcoming Sales Modal (NEW) */}
+      {selectedTool === "sales" && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex justify-center items-center z-50 p-4">
+          <div className="bg-background border border-border/50 rounded-xl shadow-2xl w-full max-w-6xl max-h-[90vh] overflow-y-auto p-6 relative animate-in fade-in zoom-in-95 duration-200 custom-scrollbar">
+            <button
+              className="absolute top-4 right-4 text-muted-foreground hover:text-foreground transition-colors font-bold text-xl z-10"
+              onClick={() => setSelectedTool(null)}
+            >
+              ✕
+            </button>
+            
+            <SalesDashboard />
+          </div>
+        </div>
+      )}
+
+      </div>
   );
 };
