@@ -130,3 +130,23 @@ class Transaction:
         except Exception:
             # last resort: current timestamp
             return datetime.now()
+        
+        
+#sentiment analysis engine
+class StockRequest(BaseModel):
+    stock_ticker: str  # e.g. TSLA
+
+class TrendingTicker(BaseModel):
+    ticker: str
+    sentiment_score: float
+    trend_percentage: float
+
+class MarketPrediction(BaseModel):
+    message: str
+
+class StockResponse(BaseModel):
+    stock_ticker: str
+    sentiment_score: float
+    trending_tickers: List[TrendingTicker]
+    market_prediction: MarketPrediction
+    timestamp: datetime

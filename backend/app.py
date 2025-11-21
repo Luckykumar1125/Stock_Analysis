@@ -14,7 +14,7 @@ from core.config import settings
 import pandas as pd
 from services.balance_sheet_analyzer.parser import BankStatementParser
 from storage.db import save_transactions
-import shutil
+import shutil,datetime
 from services.balance_sheet_analyzer.processor_llm import (
     read_transactions_from_db,
     categorize_transactions,
@@ -22,12 +22,30 @@ from services.balance_sheet_analyzer.processor_llm import (
     pie_chart_category,
     bar_chart_top_merchants
 )
-import os
+import os,requests,re,logging
 import base64
 from typing import Optional,Dict, Any
 from services.stock_screener.dynamic_scrapper import DynamicSectorStockScraper
-from pydantic import BaseModel
+from pydantic import BaseModel,HttpUrl
+# from services.sentiment_analysis.engine import (
+#     fetch_news_for_ticker,
+#     fetch_reddit_mentions,
+#     fetch_twitter_mentions,
+#     analyze_sentiment_with_llm,
+#     fetch_stock_price
+# )
+# from core.schemas import StockRequest, StockResponse, MarketPrediction, TrendingTicker
+# from services.sentiment_analysis.engine import generate_market_prediction, identify_trending_tickers
+from services.upcoming_sales import (
+    search_general_sales,
+    scrape_content,
+    extract_mixed_sales,
+    ScrapeResponse
+)
+from services.portfolio_analyzer.portfolio import PortfolioAnalyzerService,generate_advice,PortfolioRequest,get_groq_client,Groq,PortfolioAPIResponse
 router = APIRouter()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 class SectorRequest(BaseModel):
     sector: str
 app = FastAPI(title="Market News & Analysis API")
@@ -208,10 +226,6 @@ def analytics_embedded(use_llm: Optional[bool] = Query(True)):
 
 #stock screener dynamic sector stocks
 @app.post("/get-sector-stocks")
-# To avoid blocking the event loop with synchronous yfinance/LLM calls, 
-# you should ideally run this in a separate thread pool using 
-# `await asyncio.to_thread(scraper.get_stocks)` or `run_in_threadpool`.
-# For simplicity and direct relevance to your class, this is the synchronous route:
 def get_sector_stocks_sync(req: SectorRequest):
     """
     1. Instantiates DynamicSectorStockScraper with the user-provided sector.
@@ -228,3 +242,99 @@ def get_sector_stocks_sync(req: SectorRequest):
             "status": "error",
             "message": f"An unexpected error occurred: {str(e)}"
         }
+
+#sentiment analysis
+# @app.post("/analyze_stock", response_model=StockResponse)
+# def analyze_stock(request: StockRequest):
+#     ticker = request.stock_ticker.upper()
+
+#     # Fetch data
+#     news = fetch_news_for_ticker(ticker)
+#     reddit_posts = fetch_reddit_mentions(ticker)
+#     tweets = fetch_twitter_mentions(ticker)
+
+#     if not (news or reddit_posts or tweets):
+#         raise HTTPException(status_code=404, detail="No data found for that ticker")
+
+#     combined_texts = news + reddit_posts + tweets
+
+#     # Sentiment
+#     sentiment_score = analyze_sentiment_with_llm(combined_texts)
+
+#     # Trending tickers
+#     trending = identify_trending_tickers(combined_texts)
+
+#     # Stock price
+#     price = fetch_stock_price(ticker)
+
+#     # Prediction
+#     prediction = generate_market_prediction(ticker, sentiment_score, price)
+
+#     return StockResponse(
+#         stock_ticker=ticker,
+#         sentiment_score=sentiment_score,
+#         trending_tickers=trending,
+#         market_prediction=prediction,
+#         timestamp=datetime.utcnow(),
+#     )
+
+#upcoming sales scraper
+@app.post("/scrape-all-sales", response_model=ScrapeResponse)
+async def scrape_all_sales():
+    """
+    Scrapes the web for ANY active sales, deals, or clearance events across all sectors.
+    """
+    print("🚀 Starting universal sales scrape...")
+    
+    # 1. Broad Search
+    search_results = search_general_sales(max_results=5)
+    
+    if not search_results:
+        raise HTTPException(status_code=404, detail="Could not find active sales lists.")
+
+    all_sales = []
+    visited = []
+
+    # 2. Scrape & Extract
+    for res in search_results:
+        url = res['href']
+        print(f"Processing: {res['title']}")
+        visited.append(url)
+        
+        raw_text = scrape_content(url)
+        
+        if raw_text:
+            events = extract_mixed_sales(raw_text, url)
+            all_sales.extend(events)
+            
+    # Deduplicate by company name to keep list clean
+    unique_sales = {s.company_name: s for s in all_sales}.values()
+
+    return ScrapeResponse(
+        total_found=len(unique_sales),
+        source_urls_visited=visited,
+        sales=list(unique_sales)
+    )
+    
+    
+#portfolio_analyzer endpoints would go here
+@app.post("/analyze", response_model=PortfolioAPIResponse)
+def analyze_portfolio(
+    request: PortfolioRequest,
+    client: Groq = Depends(get_groq_client)
+):
+    """
+    Analyzes a stock portfolio and returns risk metrics + AI advice.
+    """
+    # 1. Run Financial Math
+    analyzer = PortfolioAnalyzerService(request.positions, request.benchmark, request.risk_free_rate)
+    analysis_result = analyzer.analyze()
+    
+    # 2. Get AI Advice
+    ai_advice = generate_advice(analysis_result, client)
+    
+    # 3. Return Composite Response
+    return PortfolioAPIResponse(
+        analysis=analysis_result,
+        ai_rebalancing_advice=ai_advice
+    )
