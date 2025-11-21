@@ -5,6 +5,7 @@ import SentimentModal from "@/components/SentimentModal";
 import StockScreener from "@/components/StockScreener";
 import PortfolioAnalyzer from "./PortfolioAnalyzer";
 import BalanceSheetAnalyzer from "./BalanceSheetAnalyzer"; // <--- Imported here
+import StockDashboard from "./PricePredictions";
 
 interface Tool {
   id: string;
@@ -167,6 +168,27 @@ export const ToolsGrid = () => {
             </button>
             
             <BalanceSheetAnalyzer />
+          </div>
+        </div>
+      )}
+      {/* 5. Price Predictions Modal (NEW) */}
+      {selectedTool === "predictions" && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex justify-center items-center z-50 p-4">
+          {/* Note: We use max-w-full or max-w-[90vw] here to give the dashboard enough room,
+             and removed p-6 padding from the container because StockDashboard has its own padding.
+          */}
+          <div className="bg-background border border-border/50 rounded-xl shadow-2xl w-full max-w-[95vw] max-h-[95vh] overflow-y-auto relative animate-in fade-in zoom-in-95 duration-200 custom-scrollbar">
+            
+            {/* Close Button */}
+            <button
+              className="absolute top-6 right-6 text-muted-foreground hover:text-foreground transition-colors font-bold text-xl z-10 bg-background/50 px-2 rounded-full"
+              onClick={() => setSelectedTool(null)}
+            >
+              ✕
+            </button>
+            
+            {/* Render the Component */}
+            <StockDashboard />
           </div>
         </div>
       )}

@@ -43,6 +43,7 @@ from services.upcoming_sales import (
     ScrapeResponse
 )
 from services.portfolio_analyzer.portfolio import PortfolioAnalyzerService,generate_advice,PortfolioRequest,get_groq_client,Groq,PortfolioAPIResponse
+from services.price_prediction.price import predict_stock_price, StockRequest
 router = APIRouter()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -338,3 +339,23 @@ def analyze_portfolio(
         analysis=analysis_result,
         ai_rebalancing_advice=ai_advice
     )
+    
+    
+#price prediction
+@app.post("/api/predict-stock")
+async def api_predict_stock(req: StockRequest):
+    # req.ticker can now be "Reliance", "Zomato", etc.
+    result = predict_stock_price(req.ticker, req.days_ahead)
+    
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Could not find stock data for '{req.ticker}'")
+    
+    base64_img = base64.b64encode(result["image_bytes"]).decode('utf-8')
+    
+    return {
+        "ticker": result["summary"]["ticker"],     # Return the ACTUAL ticker found
+        "company_name": result["summary"]["company_name"], # Return the full name
+        "image_base64": base64_img,
+        "forecast_values": result["forecast_values"],
+        "summary": result["summary"]
+    }
