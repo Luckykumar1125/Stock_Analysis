@@ -9,7 +9,10 @@ import {
   CheckCircle2,
   PieChart,
   BarChart3,
-  Loader2
+  Loader2,
+  Sparkles,
+  Scissors,
+  Target
 } from 'lucide-react';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -32,7 +35,7 @@ interface StatementStats {
   transactionCount: number;
 }
 
-// Matches the response from /analytics/embedded
+// Matches /analytics/embedded
 interface AnalyticsData {
   summary: {
     total_spend: number;
@@ -42,12 +45,29 @@ interface AnalyticsData {
   bar_png_base64: string;
 }
 
+// Matches /analytics/ai-insights
+interface AIInsightsData {
+  financial_health: {
+    income: number;
+    expense: number;
+    savings_rate: number;
+  };
+  ai_advice: {
+    cost_cutting: string;
+    saving_strategy: string;
+  };
+}
+
 export default function BalanceSheetAnalyzer() {
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
-  const [analyzing, setAnalyzing] = useState(false); // New loading state for analytics
+  const [analyzing, setAnalyzing] = useState(false);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  
+  // State for Charts and AI Insights
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
+  const [insights, setInsights] = useState<AIInsightsData | null>(null);
+  
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -57,27 +77,33 @@ export default function BalanceSheetAnalyzer() {
     if (e.target.files && e.target.files[0]) {
       setFile(e.target.files[0]);
       setError(null);
-      // Reset previous results when file changes
       setTransactions([]);
       setAnalytics(null);
+      setInsights(null);
     }
   };
 
   const fetchAnalytics = async () => {
     setAnalyzing(true);
     try {
-      // Call the embedded analytics endpoint
-      const response = await fetch('http://127.0.0.1:8000/analytics/embedded?use_llm=true');
+      // Fetch both Embedded Charts and AI Text Insights in parallel
+      const [chartsRes, insightsRes] = await Promise.all([
+        fetch('http://127.0.0.1:8000/analytics/embedded?use_llm=true'),
+        fetch('http://127.0.0.1:8000/analytics/ai-insights?use_llm=true')
+      ]);
       
-      if (!response.ok) {
-        throw new Error("Failed to fetch analytics");
+      if (!chartsRes.ok || !insightsRes.ok) {
+        throw new Error("Failed to fetch analytics data");
       }
 
-      const data: AnalyticsData = await response.json();
-      setAnalytics(data);
+      const chartsData: AnalyticsData = await chartsRes.json();
+      const insightsData: AIInsightsData = await insightsRes.json();
+
+      setAnalytics(chartsData);
+      setInsights(insightsData);
+
     } catch (err) {
       console.error("Analytics error:", err);
-      // We don't set main error here to avoid hiding the transaction list if analytics fails
     } finally {
       setAnalyzing(false);
     }
@@ -92,6 +118,7 @@ export default function BalanceSheetAnalyzer() {
     setLoading(true);
     setError(null);
     setAnalytics(null);
+    setInsights(null);
 
     const formData = new FormData();
     formData.append('file', file);
@@ -110,11 +137,8 @@ export default function BalanceSheetAnalyzer() {
       
       if (jsonResponse.data && Array.isArray(jsonResponse.data)) {
         setTransactions(jsonResponse.data);
-        
-        // 2. Immediately fetch analytics after successful parse
-        // We wait for the DB write in the backend to finish (implied by response return)
+        // Immediately fetch analytics after successful parse
         await fetchAnalytics(); 
-        
       } else {
         throw new Error("Invalid response format from server.");
       }
@@ -144,7 +168,7 @@ export default function BalanceSheetAnalyzer() {
   };
 
   const formatCurrency = (val: number) => 
-    new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(Math.abs(val));
+    new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(Math.abs(val));
 
   const stats = calculateStats(transactions);
 
@@ -157,7 +181,7 @@ export default function BalanceSheetAnalyzer() {
           Bank Statement Analyzer
         </h2>
         <p className="text-muted-foreground max-w-2xl mx-auto">
-          AI-powered financial analysis. Upload your statement to detect transactions and categorize spending.
+          AI-powered financial analysis. Upload your statement to detect transactions, categorize spending, and get saving advice.
         </p>
       </div>
 
@@ -219,7 +243,7 @@ export default function BalanceSheetAnalyzer() {
         <Tabs defaultValue="overview" className="w-full max-w-6xl mx-auto">
           <div className="flex justify-center mb-6">
             <TabsList className="grid w-[400px] grid-cols-2">
-              <TabsTrigger value="overview">Overview & Charts</TabsTrigger>
+              <TabsTrigger value="overview">Overview & AI Insights</TabsTrigger>
               <TabsTrigger value="transactions">Detailed Transactions</TabsTrigger>
             </TabsList>
           </div>
@@ -268,14 +292,61 @@ export default function BalanceSheetAnalyzer() {
               </Card>
             </div>
 
-            {/* Analytics Charts Section */}
-            {analyzing ? (
-               <div className="h-64 flex flex-col items-center justify-center text-muted-foreground space-y-2">
+            {/* AI Loading State */}
+            {analyzing && (
+               <div className="h-64 flex flex-col items-center justify-center text-muted-foreground space-y-2 border border-dashed border-border rounded-lg bg-muted/10">
                   <Loader2 className="w-8 h-8 animate-spin text-primary" />
-                  <p>Generating spending insights with AI...</p>
+                  <p>Consulting AI Financial Advisor...</p>
                </div>
-            ) : analytics ? (
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            )}
+
+            {/* AI Insights Section */}
+            {!analyzing && insights && (
+              <div className="space-y-4">
+                <h3 className="text-xl font-semibold flex items-center gap-2">
+                  <Sparkles className="w-5 h-5 text-yellow-400" /> AI Financial Advisor
+                </h3>
+                <div className="grid md:grid-cols-2 gap-4">
+                  {/* Cost Cutting Card */}
+                  <Card className="bg-gradient-to-br from-orange-500/10 to-transparent border-orange-500/20">
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-lg flex items-center gap-2 text-orange-400">
+                        <Scissors className="w-5 h-5" /> Smart Cost Cutting
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <p className="text-sm text-foreground/90 leading-relaxed">
+                        {insights.ai_advice.cost_cutting}
+                      </p>
+                    </CardContent>
+                  </Card>
+
+                  {/* Saving Strategy Card */}
+                  <Card className="bg-gradient-to-br from-blue-500/10 to-transparent border-blue-500/20">
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-lg flex items-center gap-2 text-blue-400">
+                        <Target className="w-5 h-5" /> Saving Strategy
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <p className="text-sm text-foreground/90 leading-relaxed">
+                        {insights.ai_advice.saving_strategy}
+                      </p>
+                      <div className="mt-4 pt-4 border-t border-border/50 flex justify-between items-center text-xs text-muted-foreground">
+                        <span>Current Savings Rate:</span>
+                        <span className={`font-bold ${insights.financial_health.savings_rate > 20 ? 'text-emerald-400' : 'text-yellow-400'}`}>
+                          {insights.financial_health.savings_rate}%
+                        </span>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+              </div>
+            )}
+
+            {/* Analytics Charts Section */}
+            {!analyzing && analytics && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-8">
                 {/* Category Pie Chart */}
                 <Card className="glass-card border-border/50">
                   <CardHeader>
@@ -293,8 +364,8 @@ export default function BalanceSheetAnalyzer() {
                     {/* Mini Legend/List below chart */}
                     <div className="w-full mt-6 grid grid-cols-2 gap-2 text-sm">
                         {analytics.summary.amount_per_category && Object.entries(analytics.summary.amount_per_category)
-                          .sort(([,a], [,b]) => b - a) // Sort by amount desc
-                          .slice(0, 6) // Top 6
+                          .sort(([,a], [,b]) => b - a) 
+                          .slice(0, 6) 
                           .map(([category, amount]) => (
                           <div key={category} className="flex justify-between items-center p-2 bg-muted/30 rounded">
                             <span className="truncate font-medium">{category}</span>
@@ -322,10 +393,12 @@ export default function BalanceSheetAnalyzer() {
                   </CardContent>
                 </Card>
               </div>
-            ) : (
-              <div className="text-center py-10 text-muted-foreground">
-                <p>Analytics could not be loaded.</p>
-              </div>
+            )}
+            
+            {!analyzing && !analytics && transactions.length > 0 && (
+                <div className="text-center py-10 text-muted-foreground bg-muted/10 rounded-lg">
+                  <p>Analytics could not be generated. Please try uploading again.</p>
+                </div>
             )}
 
           </TabsContent>

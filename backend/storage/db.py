@@ -1,6 +1,6 @@
 from sqlalchemy import create_engine, Column, Integer, String, Float
 from sqlalchemy.orm import declarative_base, sessionmaker
-
+from sqlalchemy.orm import sessionmaker
 Base = declarative_base()
 
 # ---------------------------
@@ -20,24 +20,16 @@ class TransactionDB(Base):
 # ---------------------------
 # Database Setup
 # ---------------------------
-engine = create_engine("sqlite:///bank_statements.db", echo=False)
-SessionLocal = sessionmaker(bind=engine)
-Base.metadata.create_all(engine)
+def get_session(db_path: str):
+    engine = create_engine(f"sqlite:///{db_path}", echo=False)
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine)()
 
 
 # ---------------------------
 # Save JSON Output to Database
 # ---------------------------
-def save_transactions(transactions_json):
-    """
-    transactions_json should be a list of dicts:
-    [
-        {"date": "...", "time": "...", "transaction_type": "...", "name": "...", "amount": 1234.56},
-        ...
-    ]
-    """
-    session = SessionLocal()
-
+def save_transactions(transactions_json, session):
     for t in transactions_json:
         entry = TransactionDB(
             date=t["date"],

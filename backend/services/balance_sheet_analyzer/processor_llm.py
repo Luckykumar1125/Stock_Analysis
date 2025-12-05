@@ -10,63 +10,79 @@ import requests
 from matplotlib import pyplot as plt
 import numpy as np
 import matplotlib
+import concurrent.futures
+import re
 matplotlib.use('Agg')
 from core.schemas import Transaction
+
+# -------------------------
+# Configuration
+# -------------------------
+CACHE_FILE = "merchant_category_cache.json"
+MAX_WORKERS = 10  # Number of simultaneous API calls
 
 # -------------------------
 # Deterministic rules
 # -------------------------
 DETERMINISTIC_MAP = {
-    "Food & Dining": ["SWIGGY", "ZOMATO", "KFC", "MCDONALD", "PIZZA", "DOMINOS"],
-    "Shopping": ["AMAZON", "FLIPKART", "MEESHO"],
-    "Online Subscriptions": ["NETFLIX", "SPOTIFY", "AMAZON PRIME", "HOTSTAR", "DISNEY+"],
-    "Salary": ["SALARY", "PAYROLL"],
-    "Bills & Utilities": ["ELECTRICITY", "AIRTEL", "JIO", "WATER BILL", "BILL"],
-    "Travel": ["OLA", "UBER", "IRCTC", "GOIBIBO", "MAHANAGAR", "INDIGO", "SPICEJET"],
-    "Entertainment": ["CINEMA", "BOOKMYSHOW", "MOVIE", "THEATRE"]
+    "Food & Dining": ["SWIGGY", "ZOMATO", "KFC", "MCDONALD", "PIZZA", "DOMINOS", "RESTAURANT", "CAFE"],
+    "Shopping": ["AMAZON", "FLIPKART", "MEESHO", "MYNTRA", "AJIO", "RELIANCE RETAIL"],
+    "Online Subscriptions": ["NETFLIX", "SPOTIFY", "AMAZON PRIME", "HOTSTAR", "DISNEY+", "YOUTUBE", "APPLE"],
+    "Salary": ["SALARY", "PAYROLL", "CREDIT INTEREST"],
+    "Bills & Utilities": ["ELECTRICITY", "AIRTEL", "JIO", "WATER BILL", "BILL", "BESCOM", "GAS"],
+    "Travel": ["OLA", "UBER", "IRCTC", "GOIBIBO", "MAHANAGAR", "INDIGO", "SPICEJET", "METRO", "RAPIDO"],
+    "Entertainment": ["CINEMA", "BOOKMYSHOW", "MOVIE", "THEATRE", "PVR", "INOX"]
 }
 
 DEFAULT_CATEGORY = "Others" 
-
-# Define keywords for transaction classification
 EXPENSE_KEYWORDS = ["debit", "paid", "withdraw", "purchase", "spent", "transfer out"]
 INCOME_KEYWORDS = ["credit", "received", "deposit", "salary", "transfer in"]
 
+# -------------------------
+# Caching Helpers
+# -------------------------
+def load_cache() -> Dict[str, str]:
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_cache(cache: Dict[str, str]):
+    try:
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(cache, f, indent=2)
+    except:
+        pass
 
 # -------------------------
 # DB reading helpers
 # -------------------------
+# -------------------------
+# DB reading helpers (FIXED)
+# -------------------------
 def open_db(db_path: str) -> sqlite3.Connection:
-    """Opens a SQLite database connection using an absolute path."""
-    # 1. Get the absolute path of the directory containing THIS file
-    script_dir = Path(__file__).resolve().parent
-
-    # 2. Navigate up to the 'backend' folder (assuming standard project structure)
-    backend_dir = script_dir.parent.parent 
-
-    # 3. Construct the final absolute path to the database file
-    DB_FILE_PATH = backend_dir / "bank_statements.db"
-    
-    print(f"Attempting to connect to absolute path: {DB_FILE_PATH}")
-
-    # 4. Connect using the absolute path
-    conn = sqlite3.connect(DB_FILE_PATH)
+    # FIX: Use the db_path passed to the function, do not ignore it!
+    if not db_path:
+        raise ValueError("Database path cannot be empty")
+        
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
 
 def read_transactions_from_db(db_path: str) -> List[Transaction]:
-    """
-    Reads transactions from the 'transactions' table or tries to parse a JSON column.
-    """
-    conn = open_db("backend/bank_statements.db")
+    # FIX: Pass the actual db_path to open_db
+    conn = open_db(db_path) 
     cur = conn.cursor()
+    txs = []
 
-    # 1) Try reading rows from transactions table
+    # 1) Try standard table
     try:
         cur.execute("SELECT date, time, transaction_type, name, amount FROM transactions")
         rows = cur.fetchall()
         if rows:
-            txs = []
             for r in rows:
                 txs.append(Transaction(
                     date=str(r["date"]),
@@ -78,9 +94,9 @@ def read_transactions_from_db(db_path: str) -> List[Transaction]:
             conn.close()
             return txs
     except sqlite3.OperationalError:
-        pass # table doesn't exist; fall through
+        pass 
 
-    # 2) Try reading from a table that has a JSON column (original complex logic preserved)
+    # 2) Fallback: JSON column scan
     try:
         cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = [r[0] for r in cur.fetchall()]
@@ -96,7 +112,6 @@ def read_transactions_from_db(db_path: str) -> List[Transaction]:
                         if isinstance(text, str) and text.strip().startswith("["):
                             parsed = json.loads(text)
                             if isinstance(parsed, list):
-                                txs = []
                                 for item in parsed:
                                     txs.append(Transaction(
                                         date=str(item.get("date", "")),
@@ -116,10 +131,9 @@ def read_transactions_from_db(db_path: str) -> List[Transaction]:
     return []
 
 # -------------------------
-# Deterministic classifier
+# Classification Logic
 # -------------------------
 def categorize_deterministic(name: str) -> str:
-    """Categorizes a transaction name based on a predefined map."""
     if not name:
         return DEFAULT_CATEGORY
     n = name.upper()
@@ -129,131 +143,154 @@ def categorize_deterministic(name: str) -> str:
                 return category
     return None
 
-# -------------------------
-# Groq LLM classifier (fallback)
-# -------------------------
 def classify_with_llm(name: str) -> str:
-    """
-    Calls a Groq LLM completion endpoint to classify the merchant name into a category.
-    Uses an improved, more directive prompt for better classification accuracy.
-    """
+    """Classifies a SINGLE merchant name. Exception safe."""
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         return DEFAULT_CATEGORY
 
-    categories = list(DETERMINISTIC_MAP.keys())
-    
-    # Define detailed category descriptions for the LLM
-    category_definitions = {
-        "Food & Dining": "Restaurants, cafes, food delivery (Swiggy, Zomato, etc.).",
-        "Shopping": "General retail purchases, e-commerce (Amazon, Flipkart, Meesho, etc.).",
-        "Online Subscriptions": "Recurring digital services (Netflix, Spotify, Prime, etc.).",
-        "Salary": "Income or payroll deposits.",
-        "Bills & Utilities": "Monthly payments for electricity, water, phone, internet.",
-        "Travel": "Taxi rides (Uber, Ola), airlines, rail, hotels, public transport.",
-        "Entertainment": "Movies, concerts, theatre, gaming, events (BookMyShow, cinema).",
-        "Others": "Any transaction that does not clearly fit into the defined categories."
-    }
-
-    # Format the definitions block for the prompt
-    definitions_block = "\n".join([f"- **{k}**: {v}" for k, v in category_definitions.items()])
-
-    # --- THE IMPROVED PROMPT ---
+    # Shorter prompt to save tokens and latency
     prompt = (
-        "SYSTEM INSTRUCTION: You are a strict categorization assistant for personal finance transactions. "
-        "Your task is to analyze the provided merchant name and return the BEST-MATCHING category "
-        "from the list below. YOU MUST RETURN ONLY THE CATEGORY NAME and NOTHING ELSE.\n\n"
-        
-        "CATEGORY DEFINITIONS:\n"
-        f"{definitions_block}\n\n"
-        
-        f"MERCHANT NAME TO CLASSIFY: \"{name}\"\n"
-        "OUTPUT (Category Name ONLY):"
+        "Classify this merchant into: Food & Dining, Shopping, Online Subscriptions, "
+        "Salary, Bills & Utilities, Travel, Entertainment, or Others.\n"
+        "Return ONLY the category name.\n\n"
+        f"Merchant: \"{name}\"\n"
+        "Category:"
     )
 
     url = "https://api.groq.ai/v1/complete"
     payload = {
-        # Consider a better general-purpose model like Llama 3 8B if available, 
-        # but retaining the current model as per your original code:
-        "model": "meta-llama/llama-guard-4-12b",
+        "model": "meta-llama/llama-guard-4-12b", # Consider switching to llama3-8b-8192 for speed if available
         "prompt": prompt,
-        "max_tokens": 10, # Increased slightly to accommodate longer category names
-        "temperature": 0.0, # Keep at 0.0 for reliable classification
+        "max_tokens": 15,
+        "temperature": 0.0,
         "stop": ["\n"]
     }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
-    # ... (Rest of the API call logic remains the same)
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=8)
+        r = requests.post(url, json=payload, headers=headers, timeout=5) # 5s timeout
         r.raise_for_status()
         data = r.json()
         
         text = None
-        if isinstance(data, dict):
-            if "choices" in data and len(data["choices"]) > 0:
-                text = data["choices"][0].get("text") or data["choices"][0].get("message", {}).get("content")
-            elif "completion" in data:
-                text = data["completion"]
-            elif "text" in data:
-                text = data["text"]
+        if "choices" in data and len(data["choices"]) > 0:
+            text = data["choices"][0].get("text")
         
         if text:
-            # Clean up the output string
-            candidate = text.strip().strip('"').strip().title()
-            
-            # Check if the candidate matches any known category exactly
-            known_categories = list(category_definitions.keys())
-            if candidate in known_categories:
-                return candidate
-            
-            # Fallback check (less strict matching)
-            for cat in known_categories:
-                if cat.upper() in candidate.upper():
-                    return cat
-
-            # If the model returns a valid, capitalized answer that is not a defined category
-            # we return "Others" to maintain the integrity of the defined categories.
-            return DEFAULT_CATEGORY
-    
+            clean_text = text.strip().strip('"').title()
+            # Basic validation
+            valid_cats = list(DETERMINISTIC_MAP.keys()) + ["Others"]
+            for vc in valid_cats:
+                if vc in clean_text:
+                    return vc
+            return "Others"
     except Exception:
-        return DEFAULT_CATEGORY
-
+        pass
+    
     return DEFAULT_CATEGORY
 
 # -------------------------
-# Full categorization pipeline
+# Optimized Pipeline
 # -------------------------
 def categorize_transactions(transactions: List[Transaction], use_llm_fallback: bool = True) -> List[Dict[str, Any]]:
-    """Runs transactions through deterministic and optional LLM classification."""
-    categorized = []
-    for t in transactions:
+    categorized_results = []
+    
+    # 1. Load Cache
+    cache = load_cache()
+    original_cache_size = len(cache)
+    
+    # 2. Identify unique unknown merchants
+    unknown_merchants = set()
+    temp_results = [] # To store intermediate state (index, Transaction, category)
+
+    for i, t in enumerate(transactions):
+        # Try deterministic first
         cat = categorize_deterministic(t.name)
-        used_llm = False
-        if not cat and use_llm_fallback:
-            cat = classify_with_llm(t.name)
-            used_llm = True
-        if not cat:
+        
+        # If deterministic failed, check cache
+        if not cat and t.name in cache:
+            cat = cache[t.name]
+            
+        # If still unknown and we want to use LLM, mark for batch processing
+        if not cat and use_llm_fallback and t.name:
+            unknown_merchants.add(t.name)
+            cat = None # Placeholder
+            
+        if not cat and not use_llm_fallback:
             cat = DEFAULT_CATEGORY
-        categorized.append({
+
+        temp_results.append({"tx": t, "cat": cat})
+
+    # 3. Process unknown merchants in Parallel
+    new_categories = {}
+    if unknown_merchants:
+        print(f"Fetching categories for {len(unknown_merchants)} unique merchants via LLM...")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_to_merchant = {executor.submit(classify_with_llm, m): m for m in unknown_merchants}
+            
+            for future in concurrent.futures.as_completed(future_to_merchant):
+                merchant = future_to_merchant[future]
+                try:
+                    res = future.result()
+                    new_categories[merchant] = res
+                    cache[merchant] = res # Update cache in memory
+                except Exception:
+                    new_categories[merchant] = DEFAULT_CATEGORY
+
+    # 4. Save Cache if updated
+    if len(cache) > original_cache_size:
+        save_cache(cache)
+
+    # helper: normalize amount sign based on transaction_type / category
+    def _signed_amount(amt, typ, cat):
+        try:
+            a = float(amt)
+        except Exception:
+            a = 0.0
+
+        typ = (typ or "").lower()
+        # if explicit expense keyword present -> treat as money out
+        if any(k in typ for k in EXPENSE_KEYWORDS):
+            return -abs(a)
+        # if explicit income keyword or Salary category -> treat as money in
+        if any(k in typ for k in INCOME_KEYWORDS) or cat == "Salary":
+            return abs(a)
+        # else preserve sign if negative, else keep positive (best-effort)
+        return a
+
+    # 5. Assemble Final List
+    for item in temp_results:
+        t = item["tx"]
+        cat = item["cat"]
+        
+        # If it was waiting for LLM, get it from the new batch
+        llm_used_flag = False
+        if cat is None:
+            cat = new_categories.get(t.name, DEFAULT_CATEGORY)
+            llm_used_flag = True if t.name in new_categories else False
+            
+        signed_amt = _signed_amount(t.amount, t.transaction_type, cat)
+
+        categorized_results.append({
             "date": t.date,
             "time": t.time,
             "transaction_type": t.transaction_type,
             "name": t.name,
-            "amount": t.amount,
+            "amount": float(t.amount) if t.amount is not None else 0.0,   # original raw amount
+            "signed_amount": signed_amt,                                  # normalized sign-aware amount
             "category": cat,
-            "llm_used": used_llm
+            "llm_used": llm_used_flag
         })
-    return categorized
+
+    return categorized_results
+
 
 # -------------------------
-# Analytics
+# Analytics (Unchanged)
 # -------------------------
 def monthly_spend_summary(categorized_transactions: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Calculates summary statistics for transactions."""
     total_received = 0.0
     total_spent = 0.0
     per_category = defaultdict(float)
@@ -261,39 +298,35 @@ def monthly_spend_summary(categorized_transactions: List[Dict[str, Any]]) -> Dic
     amounts = []
 
     for tx in categorized_transactions:
-        amt = float(tx["amount"])
-        amounts.append(amt)
+        # prefer signed_amount if present
+        amt = tx.get("signed_amount", None)
+        if amt is None:
+            try:
+                amt = float(tx.get("amount", 0.0))
+            except Exception:
+                amt = 0.0
+
+        amounts.append(abs(amt))  # for averages we use absolute transaction size
         name = tx.get("name", "").strip() or "Unknown"
         merchant_counter[name] += 1
         cat = tx.get("category", DEFAULT_CATEGORY)
         typ = (tx.get("transaction_type") or "").lower()
 
-        is_income = any(k in typ for k in INCOME_KEYWORDS) or cat == "Salary"
-        is_expense = any(k in typ for k in EXPENSE_KEYWORDS) and cat != "Salary"
-        
-        # Use an amount's sign as a final tie-breaker if type is ambiguous
-        if is_income or (not is_expense and amt > 0):
+        # sign-aware accounting: positive = money in, negative = money out
+        if amt >= 0:
             total_received += amt
-            # Only track amount per category for expenses (for plotting a spend pie chart)
-            if cat == "Salary":
-                per_category[cat] += amt # Optionally track income category amounts
-        elif is_expense or (not is_income and amt < 0):
-            total_spent += abs(amt) # Ensure total spent is positive
-            per_category[cat] += abs(amt)
+        else:
+            total_spent += abs(amt)
+            if cat != "Salary":  # don't count Salary as an expense category
+                per_category[cat] += abs(amt)
 
     net_savings = total_received - total_spent
     tx_count = len(categorized_transactions)
-    # Average calculation includes all transactions (both income and expense)
     avg_tx = (sum(amounts) / tx_count) if tx_count > 0 else 0.0
 
     top_merchants = merchant_counter.most_common(5)
     top_merchants_list = [{"merchant": m, "count": c} for m, c in top_merchants]
-
-    # Filter out Salary from the general category amounts if it skews the spend plot
-    # A pie chart of spending typically excludes income categories.
-    spend_per_category = {
-        k: v for k, v in per_category.items() if k != "Salary" and v > 0
-    }
+    spend_per_category = {k: v for k, v in per_category.items() if k != "Salary" and v > 0}
 
     return {
         "total_received": round(total_received, 2),
@@ -306,130 +339,105 @@ def monthly_spend_summary(categorized_transactions: List[Dict[str, Any]]) -> Dic
     }
 
 # -------------------------
-# Charts (matplotlib)
+# Charts (Modern Dark Mode) - Unchanged
 # -------------------------
-# -------------------------
-# Charts (Modern Dark Mode)
-# -------------------------
-
-# A palette that pops against dark backgrounds (Blue, Teal, Purple, Amber, Emerald)
 DARK_MODE_PALETTE = ["#3b82f6", "#14b8a6", "#8b5cf6", "#f59e0b", "#10b981", "#ec4899", "#06b6d4"]
 
 def pie_chart_category(amount_per_category: Dict[str, float]) -> bytes:
-    """
-    Returns PNG bytes for a modern Dark Mode Donut Chart.
-    """
-    # 1. Filter Data (Ignore zero or negative spend)
     data = {k: v for k, v in amount_per_category.items() if v > 0.01}
-    
     if not data:
-         fig, ax = plt.subplots(figsize=(1, 1))
-         fig.patch.set_alpha(0.0) # Transparent
-         ax.axis('off')
-         buf = BytesIO()
-         plt.savefig(buf, format='png', transparent=True)
-         plt.close(fig)
-         buf.seek(0)
+         fig, ax = plt.subplots(figsize=(1, 1)); fig.patch.set_alpha(0.0); ax.axis('off')
+         buf = BytesIO(); plt.savefig(buf, format='png', transparent=True); plt.close(fig); buf.seek(0)
          return buf.read()
 
-    # 2. Sort Data (Largest slice starts at 12 o'clock)
     labels = list(data.keys())
     values = list(data.values())
-    
     sorted_indices = np.argsort(values)[::-1]
     sorted_labels = [labels[i] for i in sorted_indices]
     sorted_values = [values[i] for i in sorted_indices]
-
-    # 3. Prepare Colors
     colors = DARK_MODE_PALETTE * (len(sorted_labels) // len(DARK_MODE_PALETTE) + 1)
-    colors = colors[:len(sorted_labels)]
-
-    # 4. Setup Plot
+    
     fig, ax = plt.subplots(figsize=(7, 7))
-    fig.patch.set_alpha(0.0) # Transparent background
-    ax.patch.set_alpha(0.0)
+    fig.patch.set_alpha(0.0); ax.patch.set_alpha(0.0)
 
-    # 5. Helper to hide labels on tiny slices (< 3%)
     def make_autopct(val_list):
-        def my_autopct(pct):
-            return f'{pct:.0f}%' if pct > 3 else ''
+        def my_autopct(pct): return f'{pct:.0f}%' if pct > 3 else ''
         return my_autopct
 
-    # 6. Draw Donut
     wedges, texts, autotexts = ax.pie(
-        sorted_values,
-        labels=sorted_labels,
-        colors=colors,
-        autopct=make_autopct(sorted_values),
-        startangle=90,
-        counterclock=False,
-        pctdistance=0.80,
-        labeldistance=1.25, rotatelabels=True,
+        sorted_values, labels=sorted_labels, colors=colors[:len(sorted_labels)],
+        autopct=make_autopct(sorted_values), startangle=90, counterclock=False,
+        pctdistance=0.80, labeldistance=1.25, rotatelabels=True,
         wedgeprops={'width': 0.5, 'edgecolor': '#1e293b', 'linewidth': 2},
         textprops={'color': 'white', 'fontsize': 14, 'fontweight': 'bold'}
     )
-
-    # Style internal percentages
     plt.setp(autotexts, size=9, weight="bold", color="white")
-    
-    # Style external labels (optional: make them slightly grey to reduce visual noise)
     plt.setp(texts, color="#e2e8f0") 
-
     ax.axis('equal')
-    
     buf = BytesIO()
-    # transparent=True is critical for the glassmorphism look
     plt.savefig(buf, format="png", bbox_inches='tight', transparent=True, dpi=100)
-    plt.close(fig)
-    buf.seek(0)
+    plt.close(fig); buf.seek(0)
     return buf.read()
 
 def bar_chart_top_merchants(categorized_transactions: List[Dict[str, Any]], top_n: int = 5) -> bytes:
-    """
-    Returns PNG bytes for a Dark Mode Horizontal Bar Chart.
-    """
-    # Calculate net spend per merchant
     merchant_amounts = defaultdict(float)
+
     for tx in categorized_transactions:
-        amt = float(tx.get("amount", 0.0))
+        # prefer signed_amount if present
+        amt = tx.get("signed_amount", None)
+        if amt is None:
+            try:
+                amt = float(tx.get("amount", 0.0))
+            except Exception:
+                amt = 0.0
+
         cat = tx.get("category", "Others")
         typ = (tx.get("transaction_type") or "").lower()
-        
-        # Logic: If it's an expense, add to total
-        is_expense = any(k in typ for k in EXPENSE_KEYWORDS) and cat != "Salary"
-        if is_expense:
-            merchant_amounts[tx.get("name", "Unknown")] += abs(amt)
-        elif amt > 0 and cat != "Salary" and not any(k in typ for k in INCOME_KEYWORDS):
-            # Fallback for positive amounts that are expenses
-            merchant_amounts[tx.get("name", "Unknown")] += amt
+        name = tx.get("name", "").strip() or "Unknown"
 
-    # Sort top N
+        # 1. strictly exclude Salary
+        if cat == "Salary":
+            continue
+
+        # 2. Determine if this tx should be counted as expense:
+        # if amt is negative -> expense
+        # OR if transaction_type explicitly contains expense keyword -> expense (even if amt positive)
+        is_explicit_expense = any(k in typ for k in EXPENSE_KEYWORDS)
+        is_explicit_income = any(k in typ for k in INCOME_KEYWORDS)
+
+        if is_explicit_income:
+            continue
+
+        if amt < 0:
+            merchant_amounts[name] += abs(amt)
+        elif is_explicit_expense and amt > 0:
+            merchant_amounts[name] += amt
+
+    # Sort and take top N
     top = sorted(merchant_amounts.items(), key=lambda x: x[1], reverse=True)[:top_n]
-    names = [t[0] for t in top]
-    amounts = [t[1] for t in top]
+    names, amounts = ([t[0] for t in top], [t[1] for t in top]) if top else ([], [])
 
-    # Setup Plot
+    # Plotting
     fig, ax = plt.subplots(figsize=(8, 4))
-    fig.patch.set_alpha(0.0) # Transparent
+    fig.patch.set_alpha(0.0)
     ax.patch.set_alpha(0.0)
     
     if not amounts:
         ax.text(0.5, 0.5, "No data", ha="center", va="center", color="white")
         ax.axis('off')
     else:
-        # Horizontal bars
         y_pos = np.arange(len(names))
-        # Reverse order so biggest is at top
+        # Plot bars
         ax.barh(y_pos[::-1], amounts[::-1], color='#3b82f6', height=0.6) 
         
-        # Labels and Ticks styling for Dark Mode
+        # Labels and formatting
         ax.set_yticks(y_pos[::-1])
         ax.set_yticklabels(names[::-1], color='white', fontsize=10)
         ax.set_xlabel("Amount Spent (₹)", color='#94a3b8')
+        
+        # Axis styling
         ax.tick_params(axis='x', colors='#94a3b8')
         ax.tick_params(axis='y', colors='white')
-        
-        # Remove ugly borders (spines)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.spines['bottom'].set_color('#334155')
@@ -441,3 +449,86 @@ def bar_chart_top_merchants(categorized_transactions: List[Dict[str, Any]], top_
     plt.close(fig)
     buf.seek(0)
     return buf.read()
+
+
+def generate_spending_insights(summary: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Sends the monthly summary to an LLM to generate personalized
+    saving advice and cost-cutting tips.
+    FIXED: Removed strict JSON mode to prevent 400 Errors.
+    """
+    api_key = os.getenv("GROQ_API_KEY")
+    
+    if not api_key:
+        print("ERROR: GROQ_API_KEY is missing.")
+        return {
+            "cost_cutting": "API Key missing.",
+            "saving_strategy": "Unable to generate insights."
+        }
+
+    # Prepare Data
+    total_income = summary.get("total_received", 0)
+    total_spent = summary.get("total_spent", 0)
+    savings = summary.get("net_savings", 0)
+    
+    # Get top 5 categories/merchants
+    top_cats = list(summary.get("amount_per_category", {}).items())[:5]
+    categories_str = ", ".join([f"{k}: {int(v)}" for k, v in top_cats])
+    
+    top_merchs = summary.get("top_merchants", [])[:5]
+    merchants_str = ", ".join([f"{m['merchant']}" for m in top_merchs])
+
+    # Simplified Prompt
+    prompt = (
+        f"You are a financial advisor. Analyze this monthly data:\n"
+        f"Income: {total_income}, Spent: {total_spent}, Net: {savings}\n"
+        f"Top Categories: {categories_str}\n"
+        f"Top Merchants: {merchants_str}\n\n"
+        "Respond with a valid JSON object containing exactly two keys:\n"
+        "1. \"cost_cutting\": (String) Where to cut costs and how.\n"
+        "2. \"saving_strategy\": (String) A specific saving rule to follow.\n"
+        "Do not include any markdown formatting or backticks. Just the raw JSON."
+    )
+
+    url = "[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)"
+    
+    # FIX: Removed 'response_format' to stop 400 errors. 
+    # Added 'max_tokens' to prevent cutoff.
+    payload = {
+        "model": "meta-llama/llama-guard-4-12b",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.5,
+        "max_tokens": 500 
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}", 
+        "Content-Type": "application/json"
+    }
+
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        
+        raw_content = data["choices"][0]["message"]["content"]
+        
+        # --- CLEANUP LOGIC ---
+        # 1. Remove markdown code blocks if present (```json ... ```)
+        clean_content = re.sub(r"```json|```", "", raw_content).strip()
+        
+        # 2. Parse
+        parsed = json.loads(clean_content)
+        
+        # 3. Validate keys exist
+        return {
+            "cost_cutting": parsed.get("cost_cutting", "Reduce discretionary spending."),
+            "saving_strategy": parsed.get("saving_strategy", "Save 20% of your income.")
+        }
+        
+    except Exception as e:
+        print(f"Insight Generation Failed: {e}")
+        # Return fallback data so UI doesn't break
+        return {
+            "cost_cutting": "Consider reducing dining out and subscription costs.",
+            "saving_strategy": "Try the 50/30/20 rule: 50% needs, 30% wants, 20% savings."
+        }

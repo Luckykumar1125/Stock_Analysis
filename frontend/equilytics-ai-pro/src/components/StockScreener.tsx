@@ -520,8 +520,7 @@ const fetchStocks = async (sector: string): Promise<ScreenerResults> => {
     await new Promise(resolve => setTimeout(resolve, 1500)); 
 
       try {
-        // NOTE: Uncomment this when your backend is ready
-        /*
+    
         const response = await fetch(`${BACKEND_URL}/get-sector-stocks`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -529,18 +528,8 @@ const fetchStocks = async (sector: string): Promise<ScreenerResults> => {
         });
         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
         return await response.json() as ScreenerResults;
-        */
 
-        // MOCK RETURN FOR UI TESTING
-        return {
-            status: 'success',
-            sector: sector,
-            total_stocks: 5,
-            stocks: [
-                { ticker: "MOCK1", company: "Mock Company Ltd", price: 1250.50, change: 12.5, change_percent: 1.2, market_cap: 50000000000, '52_week_high': 1300, '52_week_low': 900, volume: 1000, sector: sector, industry: "Test" },
-                { ticker: "MOCK2", company: "Alpha Industries", price: 450.00, change: -5.00, change_percent: -1.1, market_cap: 20000000000, '52_week_high': 500, '52_week_low': 400, volume: 2000, sector: sector, industry: "Test" },
-            ]
-        };
+        
 
     } catch (e) {
         console.error("API Fetch Error:", e);

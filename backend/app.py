@@ -13,14 +13,16 @@ from services.sentiment_analyzer import analyze_sentiment
 from core.config import settings
 import pandas as pd
 from services.balance_sheet_analyzer.parser import BankStatementParser
-from storage.db import save_transactions
+from storage.db import save_transactions,get_session
+import uuid
 import shutil,datetime
 from services.balance_sheet_analyzer.processor_llm import (
     read_transactions_from_db,
     categorize_transactions,
     monthly_spend_summary,
     pie_chart_category,
-    bar_chart_top_merchants
+    bar_chart_top_merchants,
+    generate_spending_insights
 )
 from services.news_categorizer import categorize_news
 import os,requests,re,logging
@@ -40,6 +42,7 @@ from pydantic import BaseModel,HttpUrl
 from services.upcoming_sales import scrape_upcoming_sales, SalesResponse
 from services.portfolio_analyzer.portfolio import PortfolioAnalyzerService,generate_advice,PortfolioRequest,get_groq_client,Groq,PortfolioAPIResponse
 from services.price_prediction.price import predict_stock_price, StockRequest
+CURRENT_DB_PATH = None
 router = APIRouter()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -138,6 +141,7 @@ async def parse_bank_statement(file: UploadFile = File(...)):
     Upload a bank statement PDF, extract JSON,
     and store transactions in the database.
     """
+    global CURRENT_DB_PATH  # <--- Allow modifying the global variable
 
     # Save uploaded file temporarily
     temp_pdf_path = f"/tmp/{file.filename}"
@@ -146,72 +150,85 @@ async def parse_bank_statement(file: UploadFile = File(...)):
 
     # Parse the bank statement
     parser = BankStatementParser(temp_pdf_path)
-    transactions = parser.to_json()  # <-- list of dicts
+    transactions = parser.to_json() 
 
     # Save to database
-    save_transactions(transactions)
+    temp_db_path = f"/tmp/bank_{uuid.uuid4().hex}.db"
+    session = get_session(temp_db_path)
 
-    return JSONResponse(content={
+    save_transactions(transactions, session)
+
+    # Update the global variable
+    CURRENT_DB_PATH = temp_db_path 
+
+    return {
         "message": "Parsed and stored successfully.",
         "transactions_stored": len(transactions),
+        "db_path": temp_db_path,          
         "data": transactions
-    })
-    
-DB_PATH = os.getenv("BANK_DB_PATH", "backend/bank_statements.db")
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "db_path": DB_PATH}
+    }
 
 @app.get("/analytics")
-def analytics(use_llm: Optional[bool] = Query(True, description="Whether to use LLM fallback for uncategorized merchants")):
-    # read transactions
-    txs = read_transactions_from_db(DB_PATH)
+def analytics(
+    db_path: str = Query(...),
+    use_llm: bool = Query(True)
+):
+    # Use the db_path provided in the Query, not the global one
+    if not db_path or not os.path.exists(db_path):
+        raise HTTPException(status_code=400, detail="Database file not found.")
+
+    txs = read_transactions_from_db(db_path)
+
     if not txs:
-        raise HTTPException(status_code=404, detail="No transactions found in DB")
+        raise HTTPException(status_code=404, detail="No transactions found")
 
     categorized = categorize_transactions(txs, use_llm_fallback=use_llm)
     summary = monthly_spend_summary(categorized)
 
-    # include a small sample of categorized transactions
-    sample = categorized[:20]
-
-    return JSONResponse(content={
+    return {
         "summary": summary,
-        "sample_transactions": sample,
+        "sample_transactions": categorized[:20],
         "counts": {
             "total_transactions": len(categorized),
             "llm_classified": sum(1 for t in categorized if t.get("llm_used"))
         }
-    })
+    }
 
 @app.get("/chart/category_pie.png")
-def category_pie(use_llm: Optional[bool] = Query(True)):
-    txs = read_transactions_from_db(DB_PATH)
-    if not txs:
-        raise HTTPException(status_code=404, detail="No transactions found in DB")
+def category_pie(
+    db_path: str = Query(...),
+    use_llm: bool = True
+):
+    txs = read_transactions_from_db(db_path)
     categorized = categorize_transactions(txs, use_llm_fallback=use_llm)
     summary = monthly_spend_summary(categorized)
     img_bytes = pie_chart_category(summary["amount_per_category"])
     return Response(content=img_bytes, media_type="image/png")
 
+
 @app.get("/chart/top_merchants.png")
-def top_merchants_chart(use_llm: Optional[bool] = Query(True), top_n: Optional[int] = Query(5)):
-    txs = read_transactions_from_db(DB_PATH)
-    if not txs:
-        raise HTTPException(status_code=404, detail="No transactions found in DB")
+def top_merchants_chart(
+    db_path: str = Query(...),
+    use_llm: bool = True,
+    top_n: int = 5
+):
+    txs = read_transactions_from_db(db_path)
     categorized = categorize_transactions(txs, use_llm_fallback=use_llm)
     img_bytes = bar_chart_top_merchants(categorized, top_n=top_n)
     return Response(content=img_bytes, media_type="image/png")
 
+
 @app.get("/analytics/embedded")
 def analytics_embedded(use_llm: Optional[bool] = Query(True)):
-    """
-    Returns JSON summary + base64-encoded PNG images for easy embedding in clients.
-    """
-    txs = read_transactions_from_db(DB_PATH)
+    global CURRENT_DB_PATH
+
+    if not CURRENT_DB_PATH:
+        raise HTTPException(status_code=400, detail="No bank statement uploaded yet.")
+
+    txs = read_transactions_from_db(CURRENT_DB_PATH)
     if not txs:
         raise HTTPException(status_code=404, detail="No transactions found in DB")
+
     categorized = categorize_transactions(txs, use_llm_fallback=use_llm)
     summary = monthly_spend_summary(categorized)
 
@@ -222,8 +239,42 @@ def analytics_embedded(use_llm: Optional[bool] = Query(True)):
         "summary": summary,
         "pie_png_base64": base64.b64encode(pie_png).decode(),
         "bar_png_base64": base64.b64encode(bar_png).decode(),
+        "db_used": CURRENT_DB_PATH
     }
 
+@app.get("/analytics/ai-insights")
+def get_ai_spending_insights(use_llm: bool = True):
+    """
+    Returns AI-generated advice on where to cut costs and how to save
+    based on the currently uploaded bank statement.
+    """
+    global CURRENT_DB_PATH
+
+    if not CURRENT_DB_PATH:
+        raise HTTPException(status_code=400, detail="No bank statement uploaded yet.")
+
+    # 1. Load Data
+    txs = read_transactions_from_db(CURRENT_DB_PATH)
+    if not txs:
+        raise HTTPException(status_code=404, detail="No transactions found")
+
+    # 2. Process Data
+    categorized = categorize_transactions(txs, use_llm_fallback=use_llm)
+    summary = monthly_spend_summary(categorized)
+
+    # 3. Generate Insights using LLM
+    insights = generate_spending_insights(summary)
+
+    return {
+        "financial_health": {
+            "income": summary["total_received"],
+            "expense": summary["total_spent"],
+            "savings_rate": round((summary["net_savings"] / summary["total_received"] * 100), 1) if summary["total_received"] > 0 else 0
+        },
+        "ai_advice": insights
+    }
+    
+    
 #stock screener dynamic sector stocks
 @app.post("/get-sector-stocks")
 def get_sector_stocks_sync(req: SectorRequest):
