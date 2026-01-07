@@ -1,6 +1,8 @@
 import os
 import json
 import requests
+import re,time
+import concurrent.futures
 from datetime import datetime
 from typing import List, Optional
 from bs4 import BeautifulSoup
@@ -8,13 +10,15 @@ from duckduckgo_search import DDGS
 from pydantic import BaseModel, Field
 from groq import Groq
 
-# --- Pydantic Models ---
+# ---------------------------------------------------------
+# 1. Pydantic Models
+# ---------------------------------------------------------
 
 class SaleEvent(BaseModel):
-    store_name: str = Field(..., description="e.g. Amazon, Flipkart, Myntra, Ajio")
-    sale_name: str = Field(..., description="e.g. Big Billion Days, End of Reason Sale")
-    start_date: Optional[str] = Field(None, description="YYYY-MM-DD or null")
-    end_date: Optional[str] = Field(None, description="YYYY-MM-DD or null")
+    store_name: str = Field(..., description="e.g. Amazon, Flipkart")
+    sale_name: str = Field(..., description="e.g. Big Billion Days")
+    start_date: Optional[str] = Field(None, description="YYYY-MM-DD")
+    end_date: Optional[str] = Field(None, description="YYYY-MM-DD")
     source_url: str
     confidence: float
 
@@ -23,76 +27,83 @@ class SalesResponse(BaseModel):
     last_updated: str
     source: str 
 
-# --- Expanded Fallback Data ---
+# ---------------------------------------------------------
+# 2. Fallback Data (Safe Mode)
+# ---------------------------------------------------------
+
 def get_fallback_data() -> List[SaleEvent]:
-    """
-    Returns a comprehensive list of standard annual sales in India.
-    Used when live scraping fails or returns too few results.
-    """
-    current_year = datetime.now().year
-    next_year = current_year + 1
+    now = datetime.now()
+    year = now.year
+    today_str = now.strftime("%Y-%m-%d")
     
-    # A much larger list of standard recurring sales
+    # Standard estimates for Indian Sales
     fallbacks = [
-        # Late 2024 / Early 2025
-        SaleEvent(store_name="Amazon/Flipkart", sale_name="Black Friday Sale", start_date=f"{current_year}-11-24", end_date=f"{current_year}-11-28", source_url="Annual Trend", confidence=0.6),
-        SaleEvent(store_name="Myntra", sale_name="End of Reason Sale (EORS)", start_date=f"{current_year}-12-09", end_date=f"{current_year}-12-15", source_url="Annual Trend", confidence=0.8),
-        SaleEvent(store_name="Amazon/Flipkart", sale_name="Christmas & Year End Sale", start_date=f"{current_year}-12-20", end_date=f"{current_year}-12-28", source_url="Annual Trend", confidence=0.7),
-        
-        # 2025
-        SaleEvent(store_name="Amazon/Flipkart", sale_name="Republic Day Sale", start_date=f"{next_year}-01-14", end_date=f"{next_year}-01-20", source_url="Annual Trend", confidence=0.9),
-        SaleEvent(store_name="Flipkart", sale_name="Valentine's Day Sale", start_date=f"{next_year}-02-07", end_date=f"{next_year}-02-14", source_url="Annual Trend", confidence=0.6),
-        SaleEvent(store_name="Amazon", sale_name="Holi Sale", start_date=f"{next_year}-03-10", end_date=f"{next_year}-03-15", source_url="Annual Trend", confidence=0.6),
-        SaleEvent(store_name="Ajio", sale_name="Big Bold Sale", start_date=f"{next_year}-03-20", end_date=f"{next_year}-03-25", source_url="Annual Trend", confidence=0.5),
-        SaleEvent(store_name="Amazon/Flipkart", sale_name="Summer Sale", start_date=f"{next_year}-05-04", end_date=f"{next_year}-05-10", source_url="Annual Trend", confidence=0.7),
-        SaleEvent(store_name="Myntra", sale_name="EORS (Summer Edition)", start_date=f"{next_year}-06-10", end_date=f"{next_year}-06-17", source_url="Annual Trend", confidence=0.8),
-        SaleEvent(store_name="Amazon", sale_name="Prime Day", start_date=f"{next_year}-07-15", end_date=f"{next_year}-07-16", source_url="Annual Trend", confidence=0.9),
-        SaleEvent(store_name="Flipkart", sale_name="Big Billion Days", start_date=f"{next_year}-10-08", end_date=f"{next_year}-10-15", source_url="Annual Trend", confidence=0.95),
+        SaleEvent(store_name="Amazon/Flipkart", sale_name="Republic Day Sale", start_date=f"{year}-01-14", end_date=f"{year}-01-20", source_url="Trend", confidence=0.9),
+        SaleEvent(store_name="Flipkart", sale_name="Valentine's Sale", start_date=f"{year}-02-07", end_date=f"{year}-02-14", source_url="Trend", confidence=0.7),
+        SaleEvent(store_name="Amazon", sale_name="Holi Sale", start_date=f"{year}-03-10", end_date=f"{year}-03-15", source_url="Trend", confidence=0.7),
+        SaleEvent(store_name="Myntra", sale_name="EORS (Summer)", start_date=f"{year}-06-10", end_date=f"{year}-06-16", source_url="Trend", confidence=0.8),
+        SaleEvent(store_name="Amazon", sale_name="Prime Day", start_date=f"{year}-07-15", end_date=f"{year}-07-16", source_url="Trend", confidence=0.9),
+        SaleEvent(store_name="Flipkart", sale_name="Big Billion Days", start_date=f"{year}-10-08", end_date=f"{year}-10-15", source_url="Trend", confidence=0.95),
     ]
-    
-    # Filter: Only show sales that haven't ended yet (or ended very recently)
-    today = datetime.now().strftime("%Y-%m-%d")
-    future_sales = []
-    for sale in fallbacks:
-        # Include if end_date is in future OR if start_date is in future
-        if sale.end_date >= today or (sale.start_date and sale.start_date >= today):
-            future_sales.append(sale)
-            
-    return future_sales
+    return [s for s in fallbacks if (s.end_date or "9999") >= today_str]
 
-# --- Scraper Logic ---
+# ---------------------------------------------------------
+# 3. Scraper Logic (Fixed Headers & Search)
+# ---------------------------------------------------------
 
-def search_sales_articles(query: str, max_results: int = 8): # <--- INCREASED TO 8
+def search_sales_articles(query: str, max_results: int = 5):
     results = []
-    try:
-        ddgs = DDGS()
-        # 'm' = past month. Ensuring freshness.
-        search_results = ddgs.text(query, region='in-en', timelimit='m', max_results=max_results)
-        if search_results:
-            for r in search_results:
-                results.append({"href": r['href'], "title": r['title']})
-    except Exception as e:
-        print(f"Search Warning: {e}")
-    return results
+    print(f"🔍 Searching: '{query}'")
 
+    start = time.time()
+    MAX_TIME = 4  # seconds hard limit
+
+    try:
+        with DDGS() as ddgs:  # ✅ ensures closure
+            # 1. Strict search (past month)
+            raw = []
+            for r in ddgs.text(query, region="in-en", timelimit="m", max_results=max_results):
+                raw.append(r)
+                if time.time() - start > MAX_TIME:
+                    break
+
+            # 2. Retry loose search if empty
+            if not raw:
+                print("   ⚠️ Strict search empty. Retrying loose...")
+                for r in ddgs.text(query, region="in-en", max_results=max_results):
+                    raw.append(r)
+                    if len(raw) >= max_results or time.time() - start > MAX_TIME:
+                        break
+
+            for r in raw:
+                results.append({
+                    "href": r.get("href"),
+                    "title": r.get("title", "")[:120]
+                })
+
+    except Exception as e:
+        print(f"⚠️ Search Error: {e}")
+
+    return results
 def fetch_page_text(url: str) -> str:
-    # Rotated User Agents to avoid detection
+    # UPDATED HEADERS to fix 403 Errors
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Referer': 'https://www.google.com/',
+        'Upgrade-Insecure-Requests': '1'
     }
     try:
-        resp = requests.get(url, headers=headers, timeout=6) # Fast timeout to keep overall speed up
+        resp = requests.get(url, headers=headers, timeout=5)
         if resp.status_code != 200: return ""
         
         soup = BeautifulSoup(resp.content, 'html.parser')
-        for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "iframe", "svg"]):
+        # Clean aggressive junk
+        for tag in soup(["script", "style", "nav", "footer", "form", "iframe", "svg", "noscript"]):
             tag.extract()
             
-        text = soup.get_text(separator=' ')
-        clean_text = ' '.join(text.split())
-        # Increased character limit slightly to capture longer lists
-        return clean_text[:10000] 
+        text = ' '.join(soup.get_text(separator=' ').split())
+        return text[:5000] # Limit size for LLM
     except:
         return ""
 
@@ -103,97 +114,117 @@ def extract_sales_with_llm(text: str, url: str) -> List[SaleEvent]:
     client = Groq(api_key=api_key)
     today = datetime.now().strftime("%Y-%m-%d")
 
-    # Prompt optimized for finding lists of sales
+    # FIX: Removed 'response_format={"type": "json_object"}' to prevent 400 Errors
     prompt = f"""
-    Today is {today}. 
-    Analyze the text and extract ALL upcoming e-commerce sales events (Amazon, Flipkart, Myntra, Ajio, Tata Cliq).
-    Look for tables or lists of dates in the text.
+    Current Date: {today}.
+    Identify upcoming 2025/2026 e-commerce sales (Amazon, Flipkart, Myntra, Ajio) or from any other Indian fashion e-commerce company from the text.
     
-    Return JSON: {{ "sales": [ {{ "store_name": "...", "sale_name": "...", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD" }} ] }}
+    Return ONLY a JSON object. No markdown, no explanations.
+    Format:
+    {{
+        "sales": [
+            {{ "store": "Amazon", "name": "Republic Day Sale", "start": "2026-01-14", "end": "2026-01-20" }}
+        ]
+    }}
     
     Rules:
-    1. If multiple sales are listed, capture ALL of them.
-    2. If a sale says "Coming Soon" or date is unclear, omit it.
-    3. Prioritize CONFIRMED dates over expected ones.
-
+    - Use YYYY-MM-DD format.
+    - If date is "Jan 15", assume current/next year properly.
+    - Ignore past sales.
+    
     TEXT:
     {text}
     """
 
     try:
         completion = client.chat.completions.create(
-            model="llama3-70b-8192", 
+            model="llama-3.3-70b-versatile", 
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            response_format={"type": "json_object"}
+            temperature=0.1 # Low temp for consistency
         )
-        data = json.loads(completion.choices[0].message.content)
+        
+        raw_content = completion.choices[0].message.content
+        
+        # Robust Cleaning (Fixes 400 Bad Request issues)
+        clean_content = re.sub(r"```json|```", "", raw_content).strip()
+        # Find the first '{' and last '}' to handle any extra text
+        start_idx = clean_content.find('{')
+        end_idx = clean_content.rfind('}') + 1
+        if start_idx != -1 and end_idx != -1:
+            clean_content = clean_content[start_idx:end_idx]
+            
+        data = json.loads(clean_content)
         
         events = []
         for s in data.get("sales", []):
-            if s.get("sale_name") and s.get("store_name"):
-                start = s.get("start_date")
-                # Basic validation: Must have a start date to be useful
-                if start and len(start) == 10: 
-                    events.append(SaleEvent(
-                        store_name=s["store_name"],
-                        sale_name=s["sale_name"],
-                        start_date=start,
-                        end_date=s.get("end_date"),
-                        source_url=url,
-                        confidence=0.9
-                    ))
+            if s.get("name") and s.get("start"):
+                events.append(SaleEvent(
+                    store_name=s.get("store", "Unknown"),
+                    sale_name=s.get("name"),
+                    start_date=s.get("start"),
+                    end_date=s.get("end"),
+                    source_url=url,
+                    confidence=0.9
+                ))
         return events
     except Exception as e:
-        print(f"LLM Error: {e}")
+        print(f"LLM Parse Error for {url[:20]}: {e}")
         return []
+
+# ---------------------------------------------------------
+# 4. Main Parallel Execution
+# ---------------------------------------------------------
+
+def process_single_article(article):
+    """Worker for ThreadPool"""
+    try:
+        text = fetch_page_text(article['href'])
+        if text:
+            return extract_sales_with_llm(text, article['href'])
+    except:
+        pass
+    return []
 
 def scrape_upcoming_sales() -> SalesResponse:
     all_events = []
     source_type = "Live Web Scrape"
     
-    # 1. Search: Increased limit and added 'fashion' to query to get Myntra/Ajio
-    print("🔍 Searching for sales...")
-    articles = search_sales_articles("upcoming online shopping sale dates India 2025 amazon flipkart myntra news", max_results=6)
+    # Dynamic Search
+    year = datetime.now().year
+    query = f"upcoming online shopping sale dates India {year} amazon flipkart myntra"
     
-    # 2. Scrape Loop
+    articles = search_sales_articles(query, max_results=6)
+    
+    # Parallel Fetch
     if articles:
-        for article in articles:
-            print(f"📄 Scanning: {article['title'][:40]}...")
-            text = fetch_page_text(article['href'])
-            if text:
-                events = extract_sales_with_llm(text, article['href'])
-                all_events.extend(events)
-    
-    # 3. Fallback & Augmentation
-    # Even if we find some live sales, we might want to append far-future sales from our hardcoded list
-    # if the live scrape only found 1 or 2 items.
-    fallback_events = get_fallback_data()
-    
+        print(f"✅ Processing {len(articles)} articles parallelly...")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            results = executor.map(process_single_article, articles)
+            for res in results:
+                if res: all_events.extend(res)
+
+    # Fallback Logic
+    fallback = get_fallback_data()
     if not all_events:
-        print("⚠️ No live data found. Using fallback.")
-        all_events = fallback_events
+        print("⚠️ Live scrape failed. Using Annual Trends.")
+        all_events = fallback
         source_type = "Annual Trends Estimate"
     elif len(all_events) < 3:
-        # If we found < 3 live sales, mix in the fallback data to make the list look full
-        print("ℹ️ Low live data. Mixing with trends.")
-        all_events.extend(fallback_events)
+        print("ℹ️ Mixing Live data with Trends.")
+        all_events.extend(fallback)
         source_type = "Hybrid (Live + Trends)"
 
-    # 4. Dedup & Sort
-    unique_events = {}
+    # Dedup
+    unique = {}
     for e in all_events:
-        # Normalize keys to avoid "Big Billion Day" vs "Big Billion Days" duplicates
-        key = f"{e.store_name.lower().split()[0]}-{e.sale_name.lower()[:10]}"
-        if key not in unique_events:
-            unique_events[key] = e
+        key = f"{e.store_name.lower()[:5]}-{e.sale_name.lower()[:10]}"
+        if key not in unique or e.source_url != "Trend":
+            unique[key] = e
             
-    # Convert back to list and Sort by start_date
-    final_list = list(unique_events.values())
-    final_list.sort(key=lambda x: x.start_date if x.start_date else "9999-99-99")
-
+    final = sorted(list(unique.values()), key=lambda x: x.start_date or "9999")
+    
     return SalesResponse(
-        sales=final_list,
+        sales=final,
         last_updated=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         source=source_type
     )

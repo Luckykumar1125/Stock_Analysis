@@ -15,7 +15,7 @@ import pandas as pd
 from services.balance_sheet_analyzer.parser import BankStatementParser
 from storage.db import save_transactions,get_session
 import uuid
-import shutil,datetime
+import shutil,datetime,tempfile
 from services.balance_sheet_analyzer.processor_llm import (
     read_transactions_from_db,
     categorize_transactions,
@@ -143,8 +143,13 @@ async def parse_bank_statement(file: UploadFile = File(...)):
     """
     global CURRENT_DB_PATH  # <--- Allow modifying the global variable
 
+    # 1. Get the correct temporary directory for the OS (Windows/Mac/Linux)
+    temp_dir = tempfile.gettempdir()
+
+    # 2. Construct the safe PDF path
+    temp_pdf_path = os.path.join(temp_dir, file.filename)
+    
     # Save uploaded file temporarily
-    temp_pdf_path = f"/tmp/{file.filename}"
     with open(temp_pdf_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
@@ -152,10 +157,11 @@ async def parse_bank_statement(file: UploadFile = File(...)):
     parser = BankStatementParser(temp_pdf_path)
     transactions = parser.to_json() 
 
+    # 3. Construct the safe Database path
+    temp_db_path = os.path.join(temp_dir, f"bank_{uuid.uuid4().hex}.db")
+    
     # Save to database
-    temp_db_path = f"/tmp/bank_{uuid.uuid4().hex}.db"
     session = get_session(temp_db_path)
-
     save_transactions(transactions, session)
 
     # Update the global variable
